@@ -1,0 +1,1 @@
+{"type": "map_canvas_bounds", "image_size": {"width": 864, "height": 527}, "canvases": [{"name": "CONUS", "bbox": [58, 76, 774, 458], "polygon": null, "confidence": 0.95}, {"name": "Alaska", "bbox": [67, 407, 235, 504], "polygon": null, "confidence": 0.9}, {"name": "Hawaii", "bbox": [352, 472, 466, 515], "polygon": null, "confidence": 0.86}]}
