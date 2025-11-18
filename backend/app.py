@@ -408,8 +408,7 @@ def generate_overlay_preview_endpoint():
             except Exception as e:
                 return jsonify({"error": f"Failed to parse region selections: {str(e)}"}), 400
         
-        # Extract Alaska and Hawaii from bounds if not provided in form
-        # This allows using detected bounds automatically
+        # Extract Alaska and Hawaii rect4 from bounds if available
         if not region_selections:
             region_selections = {}
         
@@ -417,7 +416,14 @@ def generate_overlay_preview_endpoint():
         hawaii_canvas = next((c for c in bounds.canvases if c.name.upper() in ("HAWAII", "HI")), None)
         
         if alaska_canvas and not region_selections.get("alaska"):
-            ak_x0, ak_y0, ak_x1, ak_y1 = map(int, alaska_canvas.bbox)
+            # Use rect4 if available, otherwise derive from bbox
+            if hasattr(alaska_canvas, 'rect4') and alaska_canvas.rect4 and len(alaska_canvas.rect4) == 4:
+                alaska_rect4 = alaska_canvas.rect4
+                ak_x0, ak_y0 = alaska_rect4[0]
+                ak_x1, ak_y1 = alaska_rect4[2]
+                region_selections["alaska_rect4"] = alaska_rect4
+            else:
+                ak_x0, ak_y0, ak_x1, ak_y1 = map(int, alaska_canvas.bbox)
             region_selections["alaska"] = {
                 "x": ak_x0,
                 "y": ak_y0,
@@ -426,7 +432,14 @@ def generate_overlay_preview_endpoint():
             }
         
         if hawaii_canvas and not region_selections.get("hawaii"):
-            hi_x0, hi_y0, hi_x1, hi_y1 = map(int, hawaii_canvas.bbox)
+            # Use rect4 if available, otherwise derive from bbox
+            if hasattr(hawaii_canvas, 'rect4') and hawaii_canvas.rect4 and len(hawaii_canvas.rect4) == 4:
+                hawaii_rect4 = hawaii_canvas.rect4
+                hi_x0, hi_y0 = hawaii_rect4[0]
+                hi_x1, hi_y1 = hawaii_rect4[2]
+                region_selections["hawaii_rect4"] = hawaii_rect4
+            else:
+                hi_x0, hi_y0, hi_x1, hi_y1 = map(int, hawaii_canvas.bbox)
             region_selections["hawaii"] = {
                 "x": hi_x0,
                 "y": hi_y0,
@@ -453,22 +466,26 @@ def generate_overlay_preview_endpoint():
         
         # Verify image dimensions match bounds expectation
         from PIL import Image
-        test_img = Image.open(img_path)
-        img_w, img_h = test_img.size
+        # Load image at natural size - NEVER resize
+        test_img = Image.open(img_path)  # Loads at original dimensions
+        img_w, img_h = test_img.size  # Natural dimensions from file
         expected_w = bounds.image_size.width
         expected_h = bounds.image_size.height
         
         print(f"\n🔍 OVERLAY PREVIEW REQUEST:")
         print(f"  Upload ID: {safe_id}")
         print(f"  Image file: {img_path}")
-        print(f"  Image dimensions: {img_w} x {img_h} pixels")
-        print(f"  Expected dimensions: {expected_w} x {expected_h} pixels")
+        print(f"  Image dimensions (natural): {img_w} x {img_h} pixels")
+        print(f"  Expected dimensions (from bounds): {expected_w} x {expected_h} pixels")
+        print(f"  Projection: EPSG:{projection}")
         print(f"  CONUS bbox: {bbox}")
-        print(f"  CONUS polygon: {poly}")
+        print(f"  CONUS rect4: {rect4}")
         print(f"  Region selections: {region_selections}")
         
         if img_w != expected_w or img_h != expected_h:
-            print(f"  ⚠️  WARNING: Image size mismatch! Using actual image size {img_w}x{img_h}")
+            print(f"  ⚠️  WARNING: Image size mismatch!")
+            print(f"     Actual: {img_w}x{img_h}, Expected: {expected_w}x{expected_h}")
+            print(f"     Using actual image size {img_w}x{img_h}")
         
         generate_region_overlay_preview(
             image_path=img_path,

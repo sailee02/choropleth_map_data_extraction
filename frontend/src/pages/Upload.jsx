@@ -15,7 +15,7 @@ export default function Upload({ onNavigateToHome }) {
   const [showImageSelector, setShowImageSelector] = useState(false);
   const [showRegionSelector, setShowRegionSelector] = useState(false);
   const [legendSelection, setLegendSelection] = useState(null);
-  const [regionSelections, setRegionSelections] = useState(null); // { alaska: {...}, hawaii: {...} }
+  const [regionSelections, setRegionSelections] = useState(null); // { conus: {...}, alaska: {...}, hawaii: {...} }
   const [uploadedFile, setUploadedFile] = useState(null);
   const [uploadId, setUploadId] = useState(null);
   const [overlayUrl, setOverlayUrl] = useState(null);
@@ -93,7 +93,7 @@ export default function Upload({ onNavigateToHome }) {
   const handleLegendSelection = (selection) => {
     setLegendSelection(selection);
     setShowImageSelector(false);
-    setMessage("Legend area selected. If your map includes Alaska or Hawaii, mark them now.");
+    setMessage("Legend area selected. Now mark the CONUS region (required) and optionally Alaska/Hawaii if present.");
     // Show region selector after legend selection
     setShowRegionSelector(true);
   };
@@ -101,10 +101,10 @@ export default function Upload({ onNavigateToHome }) {
   const handleRegionSelection = (regions) => {
     setRegionSelections(regions);
     setShowRegionSelector(false);
-    const hasRegions = regions.alaska || regions.hawaii;
-    setMessage(hasRegions 
-      ? "Regions marked. Click 'Preview Overlay' to check alignment, then 'Process Image' to continue."
-      : "Legend area selected. Click 'Preview Overlay' to check alignment, then 'Process Image' to continue.");
+    const hasOptionalRegions = regions.alaska || regions.hawaii;
+    setMessage(hasOptionalRegions 
+      ? "CONUS and optional regions marked. Click 'Preview Overlay' to check alignment, then 'Process Image' to continue."
+      : "CONUS marked. Click 'Preview Overlay' to check alignment, then 'Process Image' to continue.");
   };
   
   const handleGeneratePreview = async () => {

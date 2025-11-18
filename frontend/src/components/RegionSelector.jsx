@@ -1,12 +1,105 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel, onSkip }) {
-  const [regions, setRegions] = useState({ alaska: null, hawaii: null });
-  const [currentRegion, setCurrentRegion] = useState(null); // 'alaska' or 'hawaii'
+  const [regions, setRegions] = useState({ conus: null, alaska: null, hawaii: null });
+  const [currentRegion, setCurrentRegion] = useState(null); // 'conus', 'alaska', or 'hawaii'
   const [isSelecting, setIsSelecting] = useState(false);
   const [startPoint, setStartPoint] = useState(null);
   const [endPoint, setEndPoint] = useState(null);
+  const [cursorPos, setCursorPos] = useState(null); // For crosshair guides
   const imageRef = useRef(null);
+  const containerRef = useRef(null);
+
+  // Global mouse handlers to continue selection even when cursor goes outside
+  useEffect(() => {
+    const handleGlobalMouseMove = (e) => {
+      if (isSelecting && imageRef.current && containerRef.current) {
+        const rect = imageRef.current.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        
+        // Constrain to image bounds
+        const constrainedX = Math.max(0, Math.min(x, rect.width));
+        const constrainedY = Math.max(0, Math.min(y, rect.height));
+        
+        // Update end point (always update, even if outside - will be constrained)
+        setEndPoint({ x: constrainedX, y: constrainedY });
+        
+        // Update crosshairs only when inside image
+        const isInside = x >= 0 && x <= rect.width && y >= 0 && y <= rect.height;
+        if (isInside) {
+          setCursorPos({ x: constrainedX, y: constrainedY });
+        } else {
+          setCursorPos(null);
+        }
+      }
+    };
+
+    const handleGlobalMouseUp = () => {
+      if (isSelecting && startPoint && endPoint && currentRegion && imageRef.current) {
+        const rect = imageRef.current.getBoundingClientRect();
+        const left = Math.min(startPoint.x, endPoint.x);
+        const top = Math.min(startPoint.y, endPoint.y);
+        const width = Math.abs(endPoint.x - startPoint.x);
+        const height = Math.abs(endPoint.y - startPoint.y);
+        
+        // Constrain to image bounds
+        const constrainedLeft = Math.max(0, Math.min(left, rect.width));
+        const constrainedTop = Math.max(0, Math.min(top, rect.height));
+        const constrainedWidth = Math.min(width, rect.width - constrainedLeft);
+        const constrainedHeight = Math.min(height, rect.height - constrainedTop);
+        
+        if (constrainedWidth > 10 && constrainedHeight > 10) {
+          const imageWidth = imageRef.current.naturalWidth;
+          const imageHeight = imageRef.current.naturalHeight;
+          
+          // Convert to natural image coordinates
+          const natLeft = (constrainedLeft / rect.width) * imageWidth;
+          const natTop = (constrainedTop / rect.height) * imageHeight;
+          const natWidth = (constrainedWidth / rect.width) * imageWidth;
+          const natHeight = (constrainedHeight / rect.height) * imageHeight;
+          
+          // Compute rect4 coordinates (clockwise: TL, TR, BR, BL)
+          const natRight = natLeft + natWidth;
+          const natBottom = natTop + natHeight;
+          const rect4 = [
+            [Math.round(natLeft), Math.round(natTop)],      // Top-left
+            [Math.round(natRight), Math.round(natTop)],    // Top-right
+            [Math.round(natRight), Math.round(natBottom)], // Bottom-right
+            [Math.round(natLeft), Math.round(natBottom)]   // Bottom-left
+          ];
+          
+          const imageSelection = {
+            x: natLeft,
+            y: natTop,
+            width: natWidth,
+            height: natHeight,
+            rect4: rect4
+          };
+          
+          setRegions(prev => ({
+            ...prev,
+            [currentRegion]: imageSelection
+          }));
+        }
+        
+        setIsSelecting(false);
+        setStartPoint(null);
+        setEndPoint(null);
+        setCurrentRegion(null);
+        setCursorPos(null);
+      }
+    };
+
+    if (isSelecting) {
+      window.addEventListener('mousemove', handleGlobalMouseMove);
+      window.addEventListener('mouseup', handleGlobalMouseUp);
+      return () => {
+        window.removeEventListener('mousemove', handleGlobalMouseMove);
+        window.removeEventListener('mouseup', handleGlobalMouseUp);
+      };
+    }
+  }, [isSelecting, startPoint, endPoint, currentRegion]);
 
   const handleMouseDown = (e) => {
     if (!imageRef.current || !currentRegion) return;
@@ -23,16 +116,30 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
   };
 
   const handleMouseMove = (e) => {
-    if (!isSelecting || !imageRef.current) return;
+    if (!imageRef.current || !containerRef.current) return;
     
     const rect = imageRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     
+    // Check if cursor is within image bounds
+    const isInside = x >= 0 && x <= rect.width && y >= 0 && y <= rect.height;
+    
     const constrainedX = Math.max(0, Math.min(x, rect.width));
     const constrainedY = Math.max(0, Math.min(y, rect.height));
     
-    setEndPoint({ x: constrainedX, y: constrainedY });
+    // Update cursor position for crosshairs (only when inside image)
+    if (currentRegion && isInside) {
+      setCursorPos({ x: constrainedX, y: constrainedY });
+    } else if (currentRegion && !isInside) {
+      // Hide crosshairs when outside
+      setCursorPos(null);
+    }
+    
+    // Update end point if selecting (always update, even if outside - will be constrained)
+    if (isSelecting) {
+      setEndPoint({ x: constrainedX, y: constrainedY });
+    }
   };
 
   const handleMouseUp = () => {
@@ -45,30 +152,54 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
     const width = Math.abs(endPoint.x - startPoint.x);
     const height = Math.abs(endPoint.y - startPoint.y);
     
-    if (width > 10 && height > 10 && imageRef.current) {
-      const rect = imageRef.current.getBoundingClientRect();
-      const imageWidth = imageRef.current.naturalWidth;
-      const imageHeight = imageRef.current.naturalHeight;
-      
-      const imageSelection = {
-        x: (left / rect.width) * imageWidth,
-        y: (top / rect.height) * imageHeight,
-        width: (width / rect.width) * imageWidth,
-        height: (height / rect.height) * imageHeight
-      };
-      
-      setRegions(prev => ({
-        ...prev,
-        [currentRegion]: imageSelection
-      }));
+      if (width > 10 && height > 10 && imageRef.current) {
+        const rect = imageRef.current.getBoundingClientRect();
+        const imageWidth = imageRef.current.naturalWidth;
+        const imageHeight = imageRef.current.naturalHeight;
+        
+        // Convert to natural image coordinates
+        const natLeft = (left / rect.width) * imageWidth;
+        const natTop = (top / rect.height) * imageHeight;
+        const natWidth = (width / rect.width) * imageWidth;
+        const natHeight = (height / rect.height) * imageHeight;
+        
+        // Compute rect4 coordinates (clockwise: TL, TR, BR, BL)
+        const natRight = natLeft + natWidth;
+        const natBottom = natTop + natHeight;
+        const rect4 = [
+          [Math.round(natLeft), Math.round(natTop)],      // Top-left
+          [Math.round(natRight), Math.round(natTop)],    // Top-right
+          [Math.round(natRight), Math.round(natBottom)], // Bottom-right
+          [Math.round(natLeft), Math.round(natBottom)]   // Bottom-left
+        ];
+        
+        const imageSelection = {
+          x: natLeft,
+          y: natTop,
+          width: natWidth,
+          height: natHeight,
+          rect4: rect4
+        };
+        
+        setRegions(prev => ({
+          ...prev,
+          [currentRegion]: imageSelection
+        }));
       
       setStartPoint(null);
       setEndPoint(null);
       setCurrentRegion(null);
+      setCursorPos(null);
     } else {
       setStartPoint(null);
       setEndPoint(null);
     }
+  };
+
+  const handleMouseLeave = () => {
+    // Don't cancel selection, just hide crosshairs when mouse leaves
+    // Selection will resume when mouse comes back
+    setCursorPos(null);
   };
 
   const handleConfirmAll = () => {
@@ -113,20 +244,28 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
     const imageWidth = imageRef.current.naturalWidth;
     const imageHeight = imageRef.current.naturalHeight;
     
+    const regionColors = {
+      conus: { border: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)' },
+      alaska: { border: '#3b82f6', bg: 'rgba(59, 130, 246, 0.1)' },
+      hawaii: { border: '#10b981', bg: 'rgba(16, 185, 129, 0.1)' }
+    };
+    
+    const colors = regionColors[region] || regionColors.alaska;
+    
     return {
       position: 'absolute',
       left: (selection.x / imageWidth) * rect.width,
       top: (selection.y / imageHeight) * rect.height,
       width: (selection.width / imageWidth) * rect.width,
       height: (selection.height / imageHeight) * rect.height,
-      border: `2px solid ${region === 'alaska' ? '#3b82f6' : '#10b981'}`,
-      backgroundColor: region === 'alaska' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(16, 185, 129, 0.1)',
+      border: `2px solid ${colors.border}`,
+      backgroundColor: colors.bg,
       pointerEvents: 'none',
       zIndex: 10
     };
   };
 
-  const hasAnySelection = regions.alaska || regions.hawaii;
+  const hasAnySelection = regions.conus || regions.alaska || regions.hawaii;
 
   return (
     <div style={{
@@ -159,7 +298,7 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
           fontSize: '20px',
           fontWeight: '600'
         }}>
-          Optional: Mark Alaska/Hawaii Regions
+          Mark Map Regions
         </h3>
         
         <p style={{
@@ -169,9 +308,9 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
           textAlign: 'center',
           maxWidth: '500px'
         }}>
-          If your map includes Alaska or Hawaii, mark their approximate bounding boxes.
+          Mark the CONUS region (required) and optionally Alaska/Hawaii if present.
           <br />
-          <strong>This step is optional</strong> - skip if your map is CONUS-only.
+          Use the crosshair guides to draw precise rectangles.
         </p>
 
         {/* Region buttons */}
@@ -183,7 +322,32 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
           justifyContent: 'center'
         }}>
           <button
-            onClick={() => setCurrentRegion(currentRegion === 'alaska' ? null : 'alaska')}
+            onClick={() => {
+              const newRegion = currentRegion === 'conus' ? null : 'conus';
+              setCurrentRegion(newRegion);
+              if (!newRegion) setCursorPos(null);
+            }}
+            style={{
+              backgroundColor: currentRegion === 'conus' ? '#ef4444' : regions.conus ? '#fca5a5' : '#e5e7eb',
+              color: currentRegion === 'conus' || regions.conus ? 'white' : '#666',
+              border: 'none',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              fontSize: '14px',
+              fontWeight: '500',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            {regions.conus ? '✓' : ''} Mark CONUS
+          </button>
+          
+          <button
+            onClick={() => {
+              const newRegion = currentRegion === 'alaska' ? null : 'alaska';
+              setCurrentRegion(newRegion);
+              if (!newRegion) setCursorPos(null);
+            }}
             style={{
               backgroundColor: currentRegion === 'alaska' ? '#3b82f6' : regions.alaska ? '#93c5fd' : '#e5e7eb',
               color: currentRegion === 'alaska' || regions.alaska ? 'white' : '#666',
@@ -200,7 +364,11 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
           </button>
           
           <button
-            onClick={() => setCurrentRegion(currentRegion === 'hawaii' ? null : 'hawaii')}
+            onClick={() => {
+              const newRegion = currentRegion === 'hawaii' ? null : 'hawaii';
+              setCurrentRegion(newRegion);
+              if (!newRegion) setCursorPos(null);
+            }}
             style={{
               backgroundColor: currentRegion === 'hawaii' ? '#10b981' : regions.hawaii ? '#6ee7b7' : '#e5e7eb',
               color: currentRegion === 'hawaii' || regions.hawaii ? 'white' : '#666',
@@ -220,31 +388,34 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
         {currentRegion && (
           <p style={{
             margin: '0 0 12px 0',
-            color: '#3b82f6',
+            color: currentRegion === 'conus' ? '#ef4444' : currentRegion === 'alaska' ? '#3b82f6' : '#10b981',
             fontSize: '13px',
             fontWeight: '500'
           }}>
-            Click and drag to mark {currentRegion === 'alaska' ? 'Alaska' : 'Hawaii'} region
+            Click and drag to mark {currentRegion === 'conus' ? 'CONUS' : currentRegion === 'alaska' ? 'Alaska' : 'Hawaii'} region
+            <br />
+            <span style={{ fontSize: '11px', fontWeight: '400' }}>Crosshair guides will help you align precisely</span>
           </p>
         )}
         
         <div 
+          ref={containerRef}
           style={{
             position: 'relative',
             display: 'inline-block',
             maxWidth: '100%',
             maxHeight: '60vh',
-            cursor: currentRegion && isSelecting ? 'crosshair' : currentRegion ? 'crosshair' : 'default'
+            cursor: currentRegion ? 'crosshair' : 'default'
           }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
         >
           <img
             ref={imageRef}
             src={imageUrl}
-            alt="Select Alaska/Hawaii regions"
+            alt="Select map regions"
             style={{
               maxWidth: '100%',
               maxHeight: '100%',
@@ -254,6 +425,56 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
             }}
             draggable={false}
           />
+          
+          {/* Crosshair guides */}
+          {currentRegion && cursorPos && imageRef.current && (
+            <>
+              {/* Vertical line */}
+              <div style={{
+                position: 'absolute',
+                left: cursorPos.x,
+                top: 0,
+                width: '0px',
+                height: imageRef.current.getBoundingClientRect().height,
+                borderLeft: '1px dashed rgba(0, 0, 0, 0.5)',
+                pointerEvents: 'none',
+                zIndex: 5
+              }} />
+              {/* Horizontal line */}
+              <div style={{
+                position: 'absolute',
+                left: 0,
+                top: cursorPos.y,
+                width: imageRef.current.getBoundingClientRect().width,
+                height: '0px',
+                borderTop: '1px dashed rgba(0, 0, 0, 0.5)',
+                pointerEvents: 'none',
+                zIndex: 5
+              }} />
+            </>
+          )}
+          
+          {/* CONUS selection */}
+          {getSelectionStyle('conus') && (
+            <div style={getSelectionStyle('conus')} />
+          )}
+          {getConfirmedStyle('conus') && (
+            <div style={getConfirmedStyle('conus')}>
+              <div style={{
+                position: 'absolute',
+                top: '-20px',
+                left: 0,
+                backgroundColor: '#ef4444',
+                color: 'white',
+                padding: '2px 6px',
+                borderRadius: '4px',
+                fontSize: '11px',
+                fontWeight: '600'
+              }}>
+                CONUS
+              </div>
+            </div>
+          )}
           
           {/* Alaska selection */}
           {getSelectionStyle('alaska') && (
@@ -301,13 +522,31 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
         </div>
 
         {/* Clear buttons for regions */}
-        {(regions.alaska || regions.hawaii) && (
+        {(regions.conus || regions.alaska || regions.hawaii) && (
           <div style={{
             marginTop: '12px',
             display: 'flex',
             gap: '8px',
-            fontSize: '12px'
+            fontSize: '12px',
+            flexWrap: 'wrap',
+            justifyContent: 'center'
           }}>
+            {regions.conus && (
+              <button
+                onClick={() => handleClearRegion('conus')}
+                style={{
+                  backgroundColor: '#ef4444',
+                  color: 'white',
+                  border: 'none',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  cursor: 'pointer'
+                }}
+              >
+                Clear CONUS
+              </button>
+            )}
             {regions.alaska && (
               <button
                 onClick={() => handleClearRegion('alaska')}
@@ -353,19 +592,21 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
         }}>
           <button
             onClick={handleConfirmAll}
+            disabled={!regions.conus}
             style={{
-              backgroundColor: '#28a745',
+              backgroundColor: regions.conus ? '#28a745' : '#9ca3af',
               color: 'white',
               border: 'none',
               padding: '10px 20px',
               borderRadius: '6px',
               fontSize: '14px',
               fontWeight: '500',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease'
+              cursor: regions.conus ? 'pointer' : 'not-allowed',
+              transition: 'all 0.2s ease',
+              opacity: regions.conus ? 1 : 0.6
             }}
           >
-            {hasAnySelection ? 'Confirm & Continue' : 'Skip (CONUS Only)'}
+            {regions.conus ? 'Confirm & Continue' : 'Mark CONUS to Continue'}
           </button>
           
           <button

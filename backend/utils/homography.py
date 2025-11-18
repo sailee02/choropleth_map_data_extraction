@@ -147,25 +147,45 @@ def transform_gdf_with_homography(
     """
     Transform a GeoDataFrame using homography from source bounds to destination rect4.
     
+    CRITICAL: Uses ONLY rect4 dimensions, NOT whole image dimensions.
+    This prevents mixing frames that causes global rescaling bugs.
+    
     Args:
-        gdf: GeoDataFrame in source CRS
+        gdf: GeoDataFrame in source CRS (should be EPSG:5070 for Albers projection)
         src_bounds: Source bounding box [xmin, ymin, xmax, ymax] in gdf's CRS
         dst_rect4: Destination rectangle as 4 corners [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] clockwise
     
     Returns:
         Transformed GeoDataFrame in pixel coordinates (no CRS)
     """
-    # Convert bounds to corners
-    src4 = rect_bounds_to_corners(src_bounds, is_geographic=True)  # Geographic coordinates
-    dst4 = np.array(dst_rect4, dtype=float)  # Pixel coordinates
+    # Extract rect4 dimensions (NOT whole image dimensions)
+    x1, y1 = dst_rect4[0]  # Top-left
+    x2, y2 = dst_rect4[2]  # Bottom-right
+    W_rect = x2 - x1
+    H_rect = y2 - y1
     
-    # Compute homography
-    H = homography_from_4pts(src4, dst4)
+    # Shapefile native projected bounds
+    xmin, ymin, xmax, ymax = src_bounds
+    src_w = xmax - xmin
+    src_h = ymax - ymin
     
-    # Apply to all geometries
+    # Compute scale factors using RECT dimensions only
+    sx = W_rect / src_w if src_w > 0 else 0
+    sy = H_rect / src_h if src_h > 0 else 0
+    
+    # Affine transformation matrix for shapely.affinity.affine_transform
+    # Format: [a, b, d, e, xoff, yoff]
+    # [[a, b, xoff],
+    #  [d, e, yoff],
+    #  [0, 0, 1   ]]
+    # Y goes down in image pixels -> flip Y with -sy and anchor at y2 (bottom)
+    A = [sx, 0, 0, -sy, x1 - xmin * sx, y2 + ymin * sy]
+    
+    # Apply affine transformation
+    from shapely.affinity import affine_transform
     gdf_px = gdf.copy()
     gdf_px["geometry"] = gdf_px.geometry.apply(
-        lambda geom: apply_homography_to_geometry(geom, H)
+        lambda geom: affine_transform(geom, A)
     )
     gdf_px.crs = None  # Remove CRS since we're in pixel space
     
