@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ConusOverlayPreview from './ConusOverlayPreview';
 import ConusManualAlign from './ConusManualAlign';
+import AlaskaManualAlign from './AlaskaManualAlign';
 
 export default function RegionSelector({ imageUrl, uploadId, projection, onSelectionComplete, onCancel, onSkip }) {
   const [regions, setRegions] = useState({ conus: null, alaska: null, hawaii: null });
@@ -11,6 +12,7 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
   const [cursorPos, setCursorPos] = useState(null); // For crosshair guides
   const [showConusPreview, setShowConusPreview] = useState(false);
   const [showConusManualAlign, setShowConusManualAlign] = useState(false);
+  const [showAlaskaManualAlign, setShowAlaskaManualAlign] = useState(false);
   const [conusOverlayParams, setConusOverlayParams] = useState(null);
   const imageRef = useRef(null);
   const containerRef = useRef(null);
@@ -87,9 +89,13 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
             [currentRegion]: imageSelection
           }));
           
-          // If CONUS was just selected, show overlay preview
+          // If CONUS was just selected, show manual alignment
           if (currentRegion === 'conus') {
-            setShowConusPreview(true);
+            setShowConusManualAlign(true);
+          }
+          // If Alaska was just selected, show manual alignment
+          if (currentRegion === 'alaska') {
+            setShowAlaskaManualAlign(true);
           }
         }
         
@@ -283,6 +289,43 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
     setShowConusManualAlign(false);
   };
 
+  const handleAlaskaManualAlignConfirm = (alignmentParams) => {
+    // Store alignment parameters
+    setShowAlaskaManualAlign(false);
+    
+    // Extract rect4 from alignment params (user's manually aligned rectangle)
+    const userRect4 = alignmentParams.rect4 || null;
+    
+    // Calculate x, y, width, height from rect4
+    let x = 0, y = 0, width = 0, height = 0;
+    if (userRect4 && userRect4.length === 4) {
+      const [tl, tr, br, bl] = userRect4;
+      x = Math.min(tl[0], bl[0]);
+      y = Math.min(tl[1], tr[1]);
+      const right = Math.max(tr[0], br[0]);
+      const bottom = Math.max(br[1], bl[1]);
+      width = right - x;
+      height = bottom - y;
+    }
+    
+    // Create an Alaska region entry with the user's manually aligned rect4
+    setRegions(prev => ({
+      ...prev,
+      alaska: {
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        rect4: userRect4, // User's manually aligned rectangle
+        alignmentParams: alignmentParams // Store full alignment params for backend
+      }
+    }));
+  };
+
+  const handleAlaskaManualAlignCancel = () => {
+    setShowAlaskaManualAlign(false);
+  };
+
   const handleClearRegion = (region) => {
     setRegions(prev => ({
       ...prev,
@@ -355,6 +398,19 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
     );
   }
 
+  // Show Alaska manual alignment if requested
+  if (showAlaskaManualAlign && uploadId) {
+    return (
+      <AlaskaManualAlign
+        imageUrl={imageUrl}
+        uploadId={uploadId}
+        projection={projection || "4326"}
+        onConfirm={handleAlaskaManualAlignConfirm}
+        onCancel={handleAlaskaManualAlignCancel}
+      />
+    );
+  }
+
   // Show CONUS overlay preview if CONUS is selected (legacy, for backward compatibility)
   if (showConusPreview && regions.conus && uploadId) {
     return (
@@ -412,7 +468,9 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
         }}>
           Click "Mark CONUS" to align the shapefile overlay manually.
           <br />
-          Optionally mark Alaska/Hawaii regions using the crosshair guides.
+          Click "Mark Alaska" to align Alaska shapefile manually.
+          <br />
+          Optionally mark Hawaii region using the crosshair guides.
         </p>
 
         {/* Region buttons */}
@@ -450,9 +508,13 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
           
           <button
             onClick={() => {
-              const newRegion = currentRegion === 'alaska' ? null : 'alaska';
-              setCurrentRegion(newRegion);
-              if (!newRegion) setCursorPos(null);
+              if (currentRegion === 'alaska') {
+                setCurrentRegion(null);
+                setCursorPos(null);
+              } else {
+                // Show manual alignment for Alaska
+                setShowAlaskaManualAlign(true);
+              }
             }}
             style={{
               backgroundColor: currentRegion === 'alaska' ? '#3b82f6' : regions.alaska ? '#93c5fd' : '#e5e7eb',

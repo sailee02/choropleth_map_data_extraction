@@ -523,6 +523,11 @@ def get_shapefile_geojson_endpoint():
         if projection not in ("4326", "5070"):
             projection = "4326"
         
+        # Get region parameter (conus, alaska, or hawaii)
+        region = request.form.get("region", "conus").strip().lower()
+        if region not in ("conus", "alaska", "hawaii"):
+            region = "conus"
+        
         try:
             from utils.overlay_preview import _get_region_outline_path, _get_region_shapefile_path
             from data_processing import BASE_DIR
@@ -532,16 +537,18 @@ def get_shapefile_geojson_endpoint():
         
         import geopandas as gpd
         
-        # Load CONUS outline shapefile
-        outline_path = _get_region_outline_path(region="conus", projection=projection)
+        # Load region outline shapefile
+        outline_path = _get_region_outline_path(region=region, projection=projection)
         
         if not os.path.exists(outline_path):
-            shapefile_path = _get_region_shapefile_path(region="conus", projection=projection)
+            shapefile_path = _get_region_shapefile_path(region=region, projection=projection)
             if not os.path.exists(shapefile_path):
-                fallback_conus_path = os.path.join(BASE_DIR, "cb_2024_us_county_500k_conus", "cb_2024_us_county_500k_conus.shp")
-                if os.path.exists(fallback_conus_path):
-                    shapefile_path = fallback_conus_path
+                # Try fallback path for the specific region
+                fallback_path = os.path.join(BASE_DIR, f"cb_2024_us_county_500k_{region}", f"cb_2024_us_county_500k_{region}.shp")
+                if os.path.exists(fallback_path):
+                    shapefile_path = fallback_path
                 else:
+                    # Last resort: use CONUS shapefile
                     try:
                         from data_processing import SHAPEFILE_PATH
                     except ImportError:

@@ -398,7 +398,7 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
     
     # REQUIRE user's manually aligned CONUS rect4 - no fallback allowed
     user_conus_rect4 = None
-    used_manual_alignment = False  # Flag: use full image for RGB extraction when True
+    used_manual_alignment = False  # Flag: use full image for RGB extraction when True (CONUS or Alaska)
     print(f"\n  🔍 REQUIRING user's manual CONUS alignment (rect4)...")
     
     if not region_selections:
@@ -565,44 +565,140 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
             print(f"  Traceback:\n{error_trace}")
             raise ValueError(f"Failed to apply user's manual CONUS alignment: {str(homography_err)}")
     
-    # 2. Align Alaska to its bounding box with affine transformation
+    # 2. Align Alaska - use user's manually aligned rect4 if available
     if has_alaska and "alaska" in shp_regions:
         print(f"\n📍 Alaska Alignment:")
         shp_alaska = shp_regions["alaska"]
-        alaska_bbox = region_selections["alaska"]
-        # Convert image coordinates to pixel bbox: (x, y, x+width, y+height)
-        ak_x0 = int(alaska_bbox["x"])
-        ak_y0 = int(alaska_bbox["y"])
-        ak_x1 = int(alaska_bbox["x"] + alaska_bbox["width"])
-        ak_y1 = int(alaska_bbox["y"] + alaska_bbox["height"])
-        ak_bbox = (ak_x0, ak_y0, ak_x1, ak_y1)
         
-        print(f"  Shapefile bounds (EPSG:5070): {shp_alaska.total_bounds}")
-        print(f"  Image bbox: {ak_bbox}")
+        # Check if user has manually aligned the Alaska shapefile
+        user_alaska_rect4 = None
+        print(f"  🔍 REQUIRING user's manual Alaska alignment (rect4)...")
         
-        # Use affine transformation to fit Alaska to its bbox
-        gdf_ak_px = fit_gdf_to_bbox_pixels(
-            shp_alaska,
-            bbox=ak_bbox,
-            polygon=None,
-            keep_aspect=True,
-            inset_px=2,  # Small inset for Alaska/Hawaii insets
-        )
+        if not region_selections or not region_selections.get("alaska"):
+            raise ValueError("❌ ERROR: Alaska region selection is required. User must manually align Alaska shapefile.")
         
-        # Optional: refine with edge detection if region is large enough
-        if (ak_x1 - ak_x0) > 50 and (ak_y1 - ak_y0) > 50:
-            try:
-                gdf_ak_px = refine_alignment_with_edge_matching(
-                    gdf_ak_px,
-                    image_path=image_path,
-                    bbox=ak_bbox,
-                )
-                print(f"  ✓ Edge detection refinement applied")
-            except Exception as refine_err:
-                print(f"  - Edge refinement skipped: {refine_err}")
+        alaska_selection = region_selections["alaska"]
+        if not isinstance(alaska_selection, dict):
+            raise ValueError(f"❌ ERROR: Alaska selection must be a dict, got {type(alaska_selection)}")
         
-        print(f"  ✓ Alaska aligned bounds: {gdf_ak_px.total_bounds}")
-        aligned_regions.append(gdf_ak_px)
+        # Check for rect4 from manual alignment (multiple possible locations)
+        if alaska_selection.get("rect4"):
+            user_alaska_rect4 = alaska_selection["rect4"]
+            print(f"  ✓✓✓ FOUND: Using user's manually aligned Alaska rect4: {user_alaska_rect4}")
+        elif alaska_selection.get("alignmentParams"):
+            alignment_params = alaska_selection["alignmentParams"]
+            if isinstance(alignment_params, dict) and alignment_params.get("rect4"):
+                user_alaska_rect4 = alignment_params["rect4"]
+                print(f"  ✓✓✓ FOUND: Using user's manually aligned Alaska rect4 from alignmentParams: {user_alaska_rect4}")
+        elif alaska_selection.get("overlayParams"):
+            overlay_params = alaska_selection["overlayParams"]
+            if isinstance(overlay_params, dict) and overlay_params.get("rect4"):
+                user_alaska_rect4 = overlay_params["rect4"]
+                print(f"  ✓✓✓ FOUND: Using user's manually aligned Alaska rect4 from overlayParams: {user_alaska_rect4}")
+        
+        # Validate rect4 is present and valid
+        if not user_alaska_rect4:
+            raise ValueError("❌ ERROR: User's manually aligned Alaska rect4 is required. User must complete the manual alignment step.")
+        
+        if not isinstance(user_alaska_rect4, list) or len(user_alaska_rect4) != 4:
+            raise ValueError(f"❌ ERROR: User's Alaska rect4 must be a list of 4 points, got: {user_alaska_rect4}")
+        
+        # Validate each corner is a valid point
+        for i, corner in enumerate(user_alaska_rect4):
+            if not isinstance(corner, (list, tuple)) or len(corner) != 2:
+                raise ValueError(f"❌ ERROR: Alaska rect4 corner {i} must be [x, y], got: {corner}")
+        
+        # Use homography transformation with user's manually aligned rect4
+        try:
+            from utils.homography import (
+                rect_bounds_to_corners,
+                homography_from_4pts,
+                apply_homography_to_geometry
+            )
+        except ImportError:
+            from backend.utils.homography import (
+                rect_bounds_to_corners,
+                homography_from_4pts,
+                apply_homography_to_geometry
+            )
+        
+        try:
+            # Verify image dimensions match (user aligned on this exact image)
+            img_check = Image.open(image_path)
+            img_w, img_h = img_check.size
+            img_check.close()
+            
+            print(f"\n  🔍 VERIFYING USER'S MANUAL ALIGNMENT:")
+            print(f"  ✓ Image dimensions: {img_w} x {img_h} (natural pixels - SAME image user aligned on)")
+            print(f"  ✓ User's rect4 (natural pixels from frontend): {user_alaska_rect4}")
+            
+            # Verify rect4 is within image bounds and covers a reasonable area
+            all_in_bounds = True
+            rect4_x_coords = [corner[0] for corner in user_alaska_rect4]
+            rect4_y_coords = [corner[1] for corner in user_alaska_rect4]
+            rect4_width = max(rect4_x_coords) - min(rect4_x_coords)
+            rect4_height = max(rect4_y_coords) - min(rect4_y_coords)
+            
+            for i, (x, y) in enumerate(user_alaska_rect4):
+                if x < 0 or x > img_w or y < 0 or y > img_h:
+                    print(f"  ⚠️  WARNING: rect4 corner {i} ({x}, {y}) is outside image bounds ({img_w} x {img_h})")
+                    all_in_bounds = False
+            if all_in_bounds:
+                print(f"  ✓ All rect4 corners are within image bounds")
+            
+            print(f"  ✓ User's rect4 dimensions: {rect4_width} x {rect4_height} pixels")
+            print(f"  ✓ Image dimensions: {img_w} x {img_h} pixels")
+            print(f"  ✓ Rect4 coverage: {rect4_width/img_w*100:.1f}% width, {rect4_height/img_h*100:.1f}% height")
+            
+            # Get shapefile bounds as 4 corners (geographic/projected)
+            xmin, ymin, xmax, ymax = shp_alaska.total_bounds
+            src_bounds = (xmin, ymin, xmax, ymax)
+            src4 = rect_bounds_to_corners(src_bounds, is_geographic=True)
+            
+            print(f"  ✓ Shapefile bounds (EPSG:5070): {src_bounds}")
+            print(f"  ✓ Source corners (geographic):")
+            for i, corner in enumerate(src4):
+                print(f"      Corner {i}: ({corner[0]:.2f}, {corner[1]:.2f})")
+            
+            # User's rect4 is in natural image pixel coordinates
+            dst4 = np.array(user_alaska_rect4, dtype=float)
+            print(f"  ✓ Destination corners (pixels from user's alignment):")
+            for i, corner in enumerate(dst4):
+                print(f"      Corner {i}: ({corner[0]:.2f}, {corner[1]:.2f})")
+            
+            # Compute homography matrix (EXACT same as interactive overlay)
+            H = homography_from_4pts(src4, dst4)
+            print(f"  ✓ Homography matrix computed (same method as interactive overlay)")
+            
+            # Apply homography to all geometries (EXACT same as interactive overlay)
+            gdf_ak_px = shp_alaska.copy()
+            gdf_ak_px["geometry"] = gdf_ak_px.geometry.apply(
+                lambda geom: apply_homography_to_geometry(geom, H)
+            )
+            gdf_ak_px.crs = None
+            
+            # Verify transformed shapefile covers the user's rect4 area
+            tf_xmin, tf_ymin, tf_xmax, tf_ymax = gdf_ak_px.total_bounds
+            rect4_xmin = min(rect4_x_coords)
+            rect4_ymin = min(rect4_y_coords)
+            rect4_xmax = max(rect4_x_coords)
+            rect4_ymax = max(rect4_y_coords)
+            
+            print(f"\n  ✓✓✓ SUCCESS: Using user's manual alignment for processing")
+            print(f"    - User aligned rect4: {user_alaska_rect4}")
+            print(f"    - User rect4 bounds: ({rect4_xmin:.1f}, {rect4_ymin:.1f}) to ({rect4_xmax:.1f}, {rect4_ymax:.1f})")
+            print(f"    - Transformed shapefile bounds: ({tf_xmin:.1f}, {tf_ymin:.1f}) to ({tf_xmax:.1f}, {tf_ymax:.1f})")
+            print(f"    - This is the EXACT same transformation the user saw in the preview")
+            print(f"    - RGB extraction will use FULL IMAGE (not cropped) with this exact alignment\n")
+            aligned_regions.append(gdf_ak_px)
+            used_manual_alignment = True  # Flag: use full image for RGB extraction
+        except Exception as homography_err:
+            import traceback
+            error_trace = traceback.format_exc()
+            print(f"\n  ❌ ERROR in homography transformation:")
+            print(f"  Error: {str(homography_err)}")
+            print(f"  Traceback:\n{error_trace}")
+            raise ValueError(f"Failed to apply user's manual Alaska alignment: {str(homography_err)}")
     
     # 3. Align Hawaii to its bounding box with affine transformation
     if has_hawaii and "hawaii" in shp_regions:

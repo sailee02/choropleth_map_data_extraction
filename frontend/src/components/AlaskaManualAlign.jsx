@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 
 const API_ROOT = import.meta.env.VITE_API_ROOT || "http://localhost:5001";
 
-export default function ConusManualAlign({ 
+export default function AlaskaManualAlign({ 
   imageUrl, 
   uploadId, 
   projection = "4326",
@@ -25,6 +25,24 @@ export default function ConusManualAlign({
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
 
+  const MIN_SIZE = 40;
+
+  const getRectCenter = (r) => ({
+    x: r.x + r.width / 2,
+    y: r.y + r.height / 2,
+  });
+
+  const globalToLocal = (px, py, r, angleDeg) => {
+    const { x: cx, y: cy } = getRectCenter(r);
+    const dx = px - cx;
+    const dy = py - cy;
+    const angleRad = (-angleDeg * Math.PI) / 180;
+    return {
+      x: dx * Math.cos(angleRad) - dy * Math.sin(angleRad),
+      y: dx * Math.sin(angleRad) + dy * Math.cos(angleRad),
+    };
+  };
+
   // Fetch shapefile GeoJSON
   useEffect(() => {
     if (!uploadId) return;
@@ -36,7 +54,7 @@ export default function ConusManualAlign({
         const formData = new FormData();
         formData.append('upload_id', uploadId);
         formData.append('projection', projection);
-        formData.append('region', 'conus'); // Request CONUS shapefile
+        formData.append('region', 'alaska'); // Request Alaska shapefile
 
         const response = await fetch(`${API_ROOT}/api/shapefile-geojson`, {
           method: 'POST',
@@ -61,13 +79,6 @@ export default function ConusManualAlign({
   }, [uploadId, projection]);
 
   // Helper function to compute rotated corners from rect and rotation
-  const MIN_SIZE = 40;
-
-  const getRectCenter = (r) => ({
-    x: r.x + r.width / 2,
-    y: r.y + r.height / 2,
-  });
-
   const getRotatedCorners = (r, angleDeg) => {
     if (!r) return [];
     const angle = (angleDeg * Math.PI) / 180;
@@ -241,17 +252,6 @@ export default function ConusManualAlign({
   const getCorners = () => {
     if (!rect) return [];
     return getRotatedCorners(rect, rotation);
-  };
-
-  const globalToLocal = (px, py, r, angleDeg) => {
-    const { x: cx, y: cy } = getRectCenter(r);
-    const dx = px - cx;
-    const dy = py - cy;
-    const angleRad = (-angleDeg * Math.PI) / 180;
-    return {
-      x: dx * Math.cos(angleRad) - dy * Math.sin(angleRad),
-      y: dx * Math.sin(angleRad) + dy * Math.cos(angleRad),
-    };
   };
 
   // Handle corner dragging (works with rotation)
@@ -462,7 +462,6 @@ export default function ConusManualAlign({
     const scaleX = naturalWidth / bounds.width;
     const scaleY = naturalHeight / bounds.height;
     
-    // Get rotated corners and convert to natural image coordinates
     const displayCorners = getCorners();
     const naturalCorners = displayCorners.map(([x, y]) => [
       Math.round(x * scaleX),
@@ -507,7 +506,7 @@ export default function ConusManualAlign({
           fontSize: '22px',
           fontWeight: '600'
         }}>
-          Align CONUS Shapefile
+          Align Alaska Shapefile
         </h3>
 
         <p style={{
