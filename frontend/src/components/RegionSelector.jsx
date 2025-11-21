@@ -1,12 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
+import ConusOverlayPreview from './ConusOverlayPreview';
+import ConusManualAlign from './ConusManualAlign';
 
-export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel, onSkip }) {
+export default function RegionSelector({ imageUrl, uploadId, projection, onSelectionComplete, onCancel, onSkip }) {
   const [regions, setRegions] = useState({ conus: null, alaska: null, hawaii: null });
   const [currentRegion, setCurrentRegion] = useState(null); // 'conus', 'alaska', or 'hawaii'
   const [isSelecting, setIsSelecting] = useState(false);
   const [startPoint, setStartPoint] = useState(null);
   const [endPoint, setEndPoint] = useState(null);
   const [cursorPos, setCursorPos] = useState(null); // For crosshair guides
+  const [showConusPreview, setShowConusPreview] = useState(false);
+  const [showConusManualAlign, setShowConusManualAlign] = useState(false);
+  const [conusOverlayParams, setConusOverlayParams] = useState(null);
   const imageRef = useRef(null);
   const containerRef = useRef(null);
 
@@ -81,6 +86,11 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
             ...prev,
             [currentRegion]: imageSelection
           }));
+          
+          // If CONUS was just selected, show overlay preview
+          if (currentRegion === 'conus') {
+            setShowConusPreview(true);
+          }
         }
         
         setIsSelecting(false);
@@ -185,6 +195,11 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
           ...prev,
           [currentRegion]: imageSelection
         }));
+        
+        // If CONUS was just selected, show overlay preview
+        if (currentRegion === 'conus') {
+          setShowConusPreview(true);
+        }
       
       setStartPoint(null);
       setEndPoint(null);
@@ -204,8 +219,68 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
 
   const handleConfirmAll = () => {
     if (imageRef.current) {
-      onSelectionComplete(regions);
+      // Include overlay parameters if CONUS was adjusted
+      const finalRegions = { ...regions };
+      if (conusOverlayParams && finalRegions.conus) {
+        finalRegions.conus.overlayParams = conusOverlayParams;
+      }
+      onSelectionComplete(finalRegions);
     }
+  };
+
+  const handleConusPreviewConfirm = (overlayParams) => {
+    setConusOverlayParams(overlayParams);
+    setShowConusPreview(false);
+    // Update CONUS selection with overlay params
+    setRegions(prev => ({
+      ...prev,
+      conus: {
+        ...prev.conus,
+        overlayParams: overlayParams
+      }
+    }));
+  };
+
+  const handleConusPreviewCancel = () => {
+    setShowConusPreview(false);
+  };
+
+  const handleConusManualAlignConfirm = (alignmentParams) => {
+    // Store alignment parameters
+    setConusOverlayParams(alignmentParams);
+    setShowConusManualAlign(false);
+    
+    // Extract rect4 from alignment params (user's manually aligned rectangle)
+    const userRect4 = alignmentParams.rect4 || null;
+    
+    // Calculate x, y, width, height from rect4
+    let x = 0, y = 0, width = 0, height = 0;
+    if (userRect4 && userRect4.length === 4) {
+      const [tl, tr, br, bl] = userRect4;
+      x = Math.min(tl[0], bl[0]);
+      y = Math.min(tl[1], tr[1]);
+      const right = Math.max(tr[0], br[0]);
+      const bottom = Math.max(br[1], bl[1]);
+      width = right - x;
+      height = bottom - y;
+    }
+    
+    // Create a CONUS region entry with the user's manually aligned rect4
+    setRegions(prev => ({
+      ...prev,
+      conus: {
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        rect4: userRect4, // User's manually aligned rectangle
+        alignmentParams: alignmentParams // Store full alignment params for backend
+      }
+    }));
+  };
+
+  const handleConusManualAlignCancel = () => {
+    setShowConusManualAlign(false);
   };
 
   const handleClearRegion = (region) => {
@@ -267,6 +342,33 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
 
   const hasAnySelection = regions.conus || regions.alaska || regions.hawaii;
 
+  // Show CONUS manual alignment if requested
+  if (showConusManualAlign && uploadId) {
+    return (
+      <ConusManualAlign
+        imageUrl={imageUrl}
+        uploadId={uploadId}
+        projection={projection || "4326"}
+        onConfirm={handleConusManualAlignConfirm}
+        onCancel={handleConusManualAlignCancel}
+      />
+    );
+  }
+
+  // Show CONUS overlay preview if CONUS is selected (legacy, for backward compatibility)
+  if (showConusPreview && regions.conus && uploadId) {
+    return (
+      <ConusOverlayPreview
+        imageUrl={imageUrl}
+        uploadId={uploadId}
+        conusSelection={regions.conus}
+        projection={projection || "4326"}
+        onConfirm={handleConusPreviewConfirm}
+        onCancel={handleConusPreviewCancel}
+      />
+    );
+  }
+
   return (
     <div style={{
       position: 'fixed',
@@ -308,9 +410,9 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
           textAlign: 'center',
           maxWidth: '500px'
         }}>
-          Mark the CONUS region (required) and optionally Alaska/Hawaii if present.
+          Click "Mark CONUS" to align the shapefile overlay manually.
           <br />
-          Use the crosshair guides to draw precise rectangles.
+          Optionally mark Alaska/Hawaii regions using the crosshair guides.
         </p>
 
         {/* Region buttons */}
@@ -323,9 +425,13 @@ export default function RegionSelector({ imageUrl, onSelectionComplete, onCancel
         }}>
           <button
             onClick={() => {
-              const newRegion = currentRegion === 'conus' ? null : 'conus';
-              setCurrentRegion(newRegion);
-              if (!newRegion) setCursorPos(null);
+              if (currentRegion === 'conus') {
+                setCurrentRegion(null);
+                setCursorPos(null);
+              } else {
+                // Show manual alignment for CONUS
+                setShowConusManualAlign(true);
+              }
             }}
             style={{
               backgroundColor: currentRegion === 'conus' ? '#ef4444' : regions.conus ? '#fca5a5' : '#e5e7eb',

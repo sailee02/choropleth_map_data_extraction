@@ -16,13 +16,13 @@ from rasterio.features import rasterize
 from affine import Affine
 
 try:
-    from backend.utils.geo_align import fit_gdf_to_bbox_pixels, fit_with_autoinset
-    from backend.utils.homography import transform_gdf_with_homography
-    from backend.data_processing import _get_region_shapefile_path, _get_region_outline_path, BASE_DIR
-except Exception:
     from utils.geo_align import fit_gdf_to_bbox_pixels, fit_with_autoinset
-    from utils.homography import transform_gdf_with_homography
+    from utils.homography import transform_gdf_with_homography, rect_bounds_to_corners
     from data_processing import _get_region_shapefile_path, _get_region_outline_path, BASE_DIR
+except ImportError:
+    from backend.utils.geo_align import fit_gdf_to_bbox_pixels, fit_with_autoinset
+    from backend.utils.homography import transform_gdf_with_homography, rect_bounds_to_corners
+    from backend.data_processing import _get_region_shapefile_path, _get_region_outline_path, BASE_DIR
 
 
 def generate_region_overlay_preview(
@@ -105,8 +105,9 @@ def generate_region_overlay_preview(
             print(f"     Falling back to full shapefile (will create mesh effect)")
             # Fallback to full shapefile if outline doesn't exist
             shapefile_path = _get_region_shapefile_path(region=region, projection=projection)
-            if not os.path.exists(shapefile_path):
-                if region == "conus":
+        
+        if not os.path.exists(shapefile_path):
+            if region == "conus":
                     # Fallback: Try CONUS-only shapefile without projection suffix
                     fallback_conus_path = os.path.join(BASE_DIR, "cb_2024_us_county_500k_conus", "cb_2024_us_county_500k_conus.shp")
                     if os.path.exists(fallback_conus_path):
@@ -115,13 +116,14 @@ def generate_region_overlay_preview(
                     else:
                         # Last resort: use SHAPEFILE_PATH (should also be CONUS-only)
                         try:
-                            from backend.data_processing import SHAPEFILE_PATH
-                        except:
                             from data_processing import SHAPEFILE_PATH
+                        except ImportError:
+                            from backend.data_processing import SHAPEFILE_PATH
                         shapefile_path = SHAPEFILE_PATH
                         print(f"    Using CONUS-only shapefile from SHAPEFILE_PATH")
-                else:
-                    continue  # Skip if shapefile doesn't exist
+            else:
+                continue  # Skip if shapefile doesn't exist
+        
             print(f"    Using shapefile: {shapefile_path}")
             print(f"    ✓ This is a {region.upper()}-ONLY shapefile (does NOT include other regions)")
             shp = gpd.read_file(shapefile_path)
@@ -414,5 +416,144 @@ def generate_region_overlay_preview(
     result_img = Image.fromarray(overlay)
     result_img.save(output_path)  # Saves at exact (W, H) dimensions
     print(f"  ✓ Overlay saved successfully at natural size: {W}x{H}")
+    return output_path
+
+
+def generate_conus_interactive_overlay(
+    image_path: str,
+    upload_id: str,
+    conus_rect4: List[Tuple[int, int]],
+    projection: str = "4326",
+    output_path: Optional[str] = None,
+) -> str:
+    """
+    Generate CONUS-only overlay preview with user-controlled corner positions.
+    Uses homography to map shapefile bounds to the 4 corner points (allows rotation/scaling).
+    
+    Args:
+        image_path: Path to uploaded image
+        upload_id: Upload ID
+        conus_rect4: CONUS rectangle corners [(x1,y1),(x2,y2),(x3,y3),(x4,y4)] in pixel coordinates
+                     Can be rotated/scaled - homography will handle the transformation
+        projection: Projection code ("4326" or "5070")
+        output_path: Optional output path
+    
+    Returns:
+        Path to generated overlay image
+    """
+    if output_path is None:
+        output_dir = os.path.join(BASE_DIR, "data")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"{upload_id}_conus_interactive_overlay.png")
+    
+    # Load image at natural size
+    img_pil = Image.open(image_path).convert("RGB")
+    W, img_height = img_pil.size  # Use img_height to avoid conflict with homography H
+    overlay = np.array(img_pil)
+    
+    # Load CONUS outline shapefile
+    outline_path = _get_region_outline_path(region="conus", projection=projection)
+    
+    if not os.path.exists(outline_path):
+        # Fallback to full shapefile
+        shapefile_path = _get_region_shapefile_path(region="conus", projection=projection)
+        if not os.path.exists(shapefile_path):
+            fallback_conus_path = os.path.join(BASE_DIR, "cb_2024_us_county_500k_conus", "cb_2024_us_county_500k_conus.shp")
+            if os.path.exists(fallback_conus_path):
+                shapefile_path = fallback_conus_path
+            else:
+                try:
+                    from data_processing import SHAPEFILE_PATH
+                except ImportError:
+                    from backend.data_processing import SHAPEFILE_PATH
+                shapefile_path = SHAPEFILE_PATH
+        shp = gpd.read_file(shapefile_path)
+        shp["geometry"] = shp.geometry.boundary
+    else:
+        shp = gpd.read_file(outline_path)
+    
+    # Ensure GEOID column exists
+    if "GEOID" not in shp.columns:
+        shp["GEOID"] = shp.index.astype(str)
+    shp["GEOID"] = shp["GEOID"].astype(str).str.zfill(5)
+    
+    # Set CRS if missing
+    if shp.crs is None:
+        if projection == "4326":
+            shp = shp.set_crs(4326, allow_override=True)
+        elif projection == "5070":
+            shp = shp.set_crs(5070, allow_override=True)
+        else:
+            shp = shp.set_crs(4269, allow_override=True)
+    
+    # Reproject to EPSG:5070 for consistent transformation
+    target_crs = 5070
+    if shp.crs.to_epsg() != target_crs:
+        shp = shp.to_crs(target_crs)
+    
+    # Get shapefile bounds (source corners in geographic/projected coordinates)
+    xmin, ymin, xmax, ymax = shp.total_bounds
+    src_bounds = (xmin, ymin, xmax, ymax)
+    
+    # Convert shapefile bounds to 4 corners (clockwise: TL, TR, BR, BL)
+    # For geographic/projected: TL=(xmin, ymax), TR=(xmax, ymax), BR=(xmax, ymin), BL=(xmin, ymin)
+    src4 = rect_bounds_to_corners(src_bounds, is_geographic=True)
+    
+    # Destination corners are the user-dragged rect4 (already in pixel coordinates)
+    dst4 = np.array(conus_rect4, dtype=float)
+    
+    # Compute homography matrix
+    try:
+        from utils.homography import homography_from_4pts, apply_homography_to_geometry
+    except ImportError:
+        from backend.utils.homography import homography_from_4pts, apply_homography_to_geometry
+    
+    H = homography_from_4pts(src4, dst4)
+    
+    print(f"\n🔧 INTERACTIVE OVERLAY TRANSFORMATION:")
+    print(f"  Source corners (shapefile bounds): {src4}")
+    print(f"  Destination corners (user-dragged rect4): {dst4}")
+    print(f"  Homography matrix H:")
+    print(f"    {H[0]}")
+    print(f"    {H[1]}")
+    print(f"    {H[2]}")
+    
+    # Apply homography to all geometries
+    gdf_px = shp.copy()
+    gdf_px["geometry"] = gdf_px.geometry.apply(
+        lambda geom: apply_homography_to_geometry(geom, H)
+    )
+    gdf_px.crs = None
+    
+    # Debug: Check transformed bounds
+    transformed_bounds = gdf_px.total_bounds
+    print(f"  Transformed shapefile bounds: {transformed_bounds}")
+    print(f"  Expected destination bounds: [{dst4[0][0]}, {dst4[2][1]}, {dst4[2][0]}, {dst4[0][1]}]")
+    
+    # Rasterize
+    geometries_for_raster = []
+    for geom in gdf_px.geometry:
+        if geom is None or geom.is_empty:
+            continue
+        if geom.geom_type in ("LineString", "MultiLineString"):
+            geom_buffered = geom.buffer(1.0)
+            if not geom_buffered.is_empty:
+                geometries_for_raster.append(geom_buffered)
+        else:
+            geometries_for_raster.append(geom)
+    
+    if geometries_for_raster:
+        mask = rasterize(
+            [(geom, 1) for geom in geometries_for_raster],
+            out_shape=(img_height, W),  # Use img_height instead of H
+            transform=Affine.identity(),
+            fill=0,
+            dtype="uint8"
+        )
+        overlay[mask > 0] = [255, 0, 0]  # Red border
+    
+    # Save overlay
+    result_img = Image.fromarray(overlay)
+    result_img.save(output_path)
     return output_path
 

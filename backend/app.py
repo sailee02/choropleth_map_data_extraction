@@ -510,5 +510,147 @@ def generate_overlay_preview_endpoint():
         return jsonify({"error": f"Failed to generate overlay: {str(e)}"}), 500
 
 
+@app.route("/api/shapefile-geojson", methods=["POST"])
+def get_shapefile_geojson_endpoint():
+    """Get shapefile coordinates as GeoJSON for client-side rendering."""
+    try:
+        upload_id = request.form.get("upload_id")
+        if not upload_id:
+            return jsonify({"error": "upload_id required"}), 400
+        
+        safe_id = _sanitize_upload_id(upload_id)
+        projection = request.form.get("projection", "4326").strip()
+        if projection not in ("4326", "5070"):
+            projection = "4326"
+        
+        try:
+            from utils.overlay_preview import _get_region_outline_path, _get_region_shapefile_path
+            from data_processing import BASE_DIR
+        except ImportError:
+            from backend.utils.overlay_preview import _get_region_outline_path, _get_region_shapefile_path
+            from backend.data_processing import BASE_DIR
+        
+        import geopandas as gpd
+        
+        # Load CONUS outline shapefile
+        outline_path = _get_region_outline_path(region="conus", projection=projection)
+        
+        if not os.path.exists(outline_path):
+            shapefile_path = _get_region_shapefile_path(region="conus", projection=projection)
+            if not os.path.exists(shapefile_path):
+                fallback_conus_path = os.path.join(BASE_DIR, "cb_2024_us_county_500k_conus", "cb_2024_us_county_500k_conus.shp")
+                if os.path.exists(fallback_conus_path):
+                    shapefile_path = fallback_conus_path
+                else:
+                    try:
+                        from data_processing import SHAPEFILE_PATH
+                    except ImportError:
+                        from backend.data_processing import SHAPEFILE_PATH
+                    shapefile_path = SHAPEFILE_PATH
+            shp = gpd.read_file(shapefile_path)
+            shp["geometry"] = shp.geometry.boundary
+        else:
+            shp = gpd.read_file(outline_path)
+        
+        # Reproject to EPSG:5070
+        target_crs = 5070
+        if shp.crs is None:
+            if projection == "4326":
+                shp = shp.set_crs(4326, allow_override=True)
+            elif projection == "5070":
+                shp = shp.set_crs(5070, allow_override=True)
+            else:
+                shp = shp.set_crs(4269, allow_override=True)
+        
+        if shp.crs.to_epsg() != target_crs:
+            shp = shp.to_crs(target_crs)
+        
+        # Get bounds for transformation reference
+        xmin, ymin, xmax, ymax = shp.total_bounds
+        bounds = {"xmin": float(xmin), "ymin": float(ymin), "xmax": float(xmax), "ymax": float(ymax)}
+        
+        # Convert to GeoJSON (simplified for performance)
+        geojson = shp.to_json()
+        
+        return jsonify({
+            "status": "ok",
+            "geojson": json.loads(geojson),
+            "bounds": bounds
+        })
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"\n❌ ERROR in get-shapefile-geojson:")
+        print(error_trace)
+        return jsonify({"error": f"Failed to get shapefile GeoJSON: {str(e)}"}), 500
+
+@app.route("/api/preview-overlay-interactive", methods=["POST"])
+def preview_overlay_interactive_endpoint():
+    """Generate interactive CONUS overlay with user-controlled rotation and scale."""
+    try:
+        upload_id = request.form.get("upload_id")
+        if not upload_id:
+            return jsonify({"error": "upload_id required"}), 400
+        
+        safe_id = _sanitize_upload_id(upload_id)
+        
+        # Get CONUS rect4 from form
+        conus_rect4_str = request.form.get("conus_rect4", "").strip()
+        if not conus_rect4_str:
+            return jsonify({"error": "conus_rect4 required"}), 400
+        
+        try:
+            conus_rect4 = json.loads(conus_rect4_str)
+            if not isinstance(conus_rect4, list) or len(conus_rect4) != 4:
+                return jsonify({"error": "conus_rect4 must be a list of 4 points"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to parse conus_rect4: {str(e)}"}), 400
+        
+        # Get projection
+        projection = request.form.get("projection", "4326").strip()
+        if projection not in ("4326", "5070"):
+            projection = "4326"
+        
+        # Find the image file
+        for ext in [".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"]:
+            img_path = os.path.join(DATA_DIR, f"{safe_id}{ext}")
+            if os.path.exists(img_path):
+                break
+        else:
+            return jsonify({"error": "Image file not found"}), 404
+        
+        # Generate interactive overlay using homography with 4 corner points
+        try:
+            from utils.overlay_preview import generate_conus_interactive_overlay
+        except Exception:
+            from backend.utils.overlay_preview import generate_conus_interactive_overlay
+        
+        overlay_filename = f"{safe_id}_conus_interactive_overlay.png"
+        overlay_path = os.path.join(DATA_DIR, overlay_filename)
+        
+        generate_conus_interactive_overlay(
+            image_path=img_path,
+            upload_id=safe_id,
+            conus_rect4=[tuple(p) for p in conus_rect4],
+            projection=projection,
+            output_path=overlay_path,
+        )
+        
+        return jsonify({
+            "status": "ok",
+            "overlayFilename": overlay_filename,
+            "overlayUrl": f"/data/{overlay_filename}"
+        })
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"\n❌ ERROR in preview-overlay-interactive:")
+        print(error_trace)
+        print(f"Error message: {str(e)}\n")
+        return jsonify({"error": f"Failed to generate interactive overlay: {str(e)}"}), 500
+
+
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5001)

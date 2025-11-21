@@ -391,56 +391,179 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
     
     aligned_regions = []
     
-    # 1. Align CONUS to main bbox with edge detection
+    # 1. Align CONUS - use user's manually aligned rect4 if available
     print(f"\n📍 CONUS Alignment:")
     shp_conus = shp_regions["conus"]
     print(f"  Shapefile bounds (EPSG:5070): {shp_conus.total_bounds}")
-    print(f"  Image bbox: ({x0}, {y0}) to ({x1}, {y1})")
     
-    try:
-        # Use edge detection and auto-inset tuning for CONUS
-        gdf_conus_px, edge_score, chosen_inset = fit_with_autoinset(
-            shp_conus,
-            image_path=image_path,
-            bbox=bbox,
-            polygon=poly,
-            keep_aspect=True,
-            inset_candidates=(4, 6, 8, 10),
-        )
-        print(f"  ✓ Auto-tuned alignment with edge detection:")
-        print(f"    - Best inset: {chosen_inset}px")
-        print(f"    - Edge overlap score: {edge_score:.3f}")
-        print(f"    - Aligned bounds: {gdf_conus_px.total_bounds}")
-        
-        # Optionally refine alignment with edge matching
+    # REQUIRE user's manually aligned CONUS rect4 - no fallback allowed
+    user_conus_rect4 = None
+    used_manual_alignment = False  # Flag: use full image for RGB extraction when True
+    print(f"\n  🔍 REQUIRING user's manual CONUS alignment (rect4)...")
+    
+    if not region_selections:
+        raise ValueError("❌ ERROR: region_selections is required. User must manually align CONUS shapefile.")
+    
+    if not region_selections.get("conus"):
+        raise ValueError("❌ ERROR: CONUS region selection is required. User must manually align CONUS shapefile.")
+    
+    conus_selection = region_selections["conus"]
+    if not isinstance(conus_selection, dict):
+        raise ValueError(f"❌ ERROR: CONUS selection must be a dict, got {type(conus_selection)}")
+    
+    # Check for rect4 from manual alignment (multiple possible locations)
+    if conus_selection.get("rect4"):
+        user_conus_rect4 = conus_selection["rect4"]
+        print(f"  ✓✓✓ FOUND: Using user's manually aligned CONUS rect4: {user_conus_rect4}")
+    elif conus_selection.get("alignmentParams"):
+        alignment_params = conus_selection["alignmentParams"]
+        if isinstance(alignment_params, dict) and alignment_params.get("rect4"):
+            user_conus_rect4 = alignment_params["rect4"]
+            print(f"  ✓✓✓ FOUND: Using user's manually aligned CONUS rect4 from alignmentParams: {user_conus_rect4}")
+    elif conus_selection.get("overlayParams"):
+        overlay_params = conus_selection["overlayParams"]
+        if isinstance(overlay_params, dict) and overlay_params.get("rect4"):
+            user_conus_rect4 = overlay_params["rect4"]
+            print(f"  ✓✓✓ FOUND: Using user's manually aligned CONUS rect4 from overlayParams: {user_conus_rect4}")
+    
+    # Validate rect4 is present and valid
+    if not user_conus_rect4:
+        raise ValueError("❌ ERROR: User's manually aligned CONUS rect4 is required. User must complete the manual alignment step.")
+    
+    if not isinstance(user_conus_rect4, list) or len(user_conus_rect4) != 4:
+        raise ValueError(f"❌ ERROR: User's CONUS rect4 must be a list of 4 points, got: {user_conus_rect4}")
+    
+    # Validate each corner is a valid point
+    for i, corner in enumerate(user_conus_rect4):
+        if not isinstance(corner, (list, tuple)) or len(corner) != 2:
+            raise ValueError(f"❌ ERROR: CONUS rect4 corner {i} must be [x, y], got: {corner}")
+    
+    # Use homography transformation with user's manually aligned rect4
+    if True:  # Always use user's rect4 - no fallback
+        # Use homography transformation with user's manually aligned rect4
+        # IMPORTANT: Use the EXACT same transformation as the interactive overlay preview
+        # The user aligned the shapefile on the displayed image, and we need to use
+        # the EXACT same image (no scaling) and EXACT same transformation
         try:
-            gdf_conus_px = refine_alignment_with_edge_matching(
-                gdf_conus_px,
-                image_path=image_path,
-                bbox=bbox,
+            from utils.homography import (
+                rect_bounds_to_corners,
+                homography_from_4pts,
+                apply_homography_to_geometry
             )
-            print(f"    - Edge refinement applied")
-        except Exception as refine_err:
-            print(f"    - Edge refinement skipped: {refine_err}")
+        except ImportError:
+            from backend.utils.homography import (
+                rect_bounds_to_corners,
+                homography_from_4pts,
+                apply_homography_to_geometry
+            )
         
-        aligned_regions.append(gdf_conus_px)
-    except Exception as autoinset_err:
-        print(f"  ⚠️  Auto-inset failed: {autoinset_err}")
-        print(f"  → Using manual affine transformation with inset=6px")
-        gdf_conus_px = fit_gdf_to_bbox_pixels(
-            shp_conus,
-            bbox=bbox,
-            polygon=None,
-            keep_aspect=True,
-            inset_px=6,
-        )
-        from shapely.geometry import Polygon
-        clip_poly = Polygon(poly if len(poly) >= 3 else [(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
-        gdf_conus_px = gdf_conus_px.set_geometry(gdf_conus_px.geometry.intersection(clip_poly), crs=None)
-        gdf_conus_px = gdf_conus_px[~gdf_conus_px.geometry.is_empty]
-        print(f"  ✓ Manual alignment complete")
-        print(f"    - Aligned bounds: {gdf_conus_px.total_bounds}")
-        aligned_regions.append(gdf_conus_px)
+        try:
+            # Verify image dimensions match (user aligned on this exact image)
+            # Load image to check dimensions - this is the SAME image the user aligned on
+            img_check = Image.open(image_path)
+            img_w, img_h = img_check.size
+            img_check.close()
+            
+            print(f"\n  🔍 VERIFYING USER'S MANUAL ALIGNMENT:")
+            print(f"  ✓ Image dimensions: {img_w} x {img_h} (natural pixels - SAME image user aligned on)")
+            print(f"  ✓ User's rect4 (natural pixels from frontend): {user_conus_rect4}")
+            
+            # Verify rect4 is within image bounds and covers a reasonable area
+            all_in_bounds = True
+            rect4_x_coords = [corner[0] for corner in user_conus_rect4]
+            rect4_y_coords = [corner[1] for corner in user_conus_rect4]
+            rect4_width = max(rect4_x_coords) - min(rect4_x_coords)
+            rect4_height = max(rect4_y_coords) - min(rect4_y_coords)
+            
+            for i, (x, y) in enumerate(user_conus_rect4):
+                if x < 0 or x > img_w or y < 0 or y > img_h:
+                    print(f"  ⚠️  WARNING: rect4 corner {i} ({x}, {y}) is outside image bounds ({img_w} x {img_h})")
+                    all_in_bounds = False
+            if all_in_bounds:
+                print(f"  ✓ All rect4 corners are within image bounds")
+            
+            print(f"  ✓ User's rect4 dimensions: {rect4_width} x {rect4_height} pixels")
+            print(f"  ✓ Image dimensions: {img_w} x {img_h} pixels")
+            print(f"  ✓ Rect4 coverage: {rect4_width/img_w*100:.1f}% width, {rect4_height/img_h*100:.1f}% height")
+            
+            # Warn if rect4 seems too small (less than 50% of image)
+            if rect4_width < img_w * 0.5 or rect4_height < img_h * 0.5:
+                print(f"  ⚠️  WARNING: User's rect4 seems small ({rect4_width/img_w*100:.1f}% x {rect4_height/img_h*100:.1f}%)")
+                print(f"  ⚠️  This might not cover the full CONUS map area!")
+            
+            # Get shapefile bounds as 4 corners (geographic/projected)
+            # Use EXACT same method as generate_conus_interactive_overlay
+            # The shapefile should be CONUS-only, already reprojected to EPSG:5070
+            xmin, ymin, xmax, ymax = shp_conus.total_bounds
+            src_bounds = (xmin, ymin, xmax, ymax)
+            # Convert to 4 corners: TL=(xmin, ymax), TR=(xmax, ymax), BR=(xmax, ymin), BL=(xmin, ymin)
+            # This matches generate_conus_interactive_overlay exactly
+            src4 = rect_bounds_to_corners(src_bounds, is_geographic=True)
+            
+            print(f"  ✓ Shapefile bounds (EPSG:5070): {src_bounds}")
+            print(f"  ✓ Source corners (geographic):")
+            for i, corner in enumerate(src4):
+                print(f"      Corner {i}: ({corner[0]:.2f}, {corner[1]:.2f})")
+            
+            # User's rect4 is in natural image pixel coordinates
+            # The frontend converted display coordinates to natural pixels using:
+            # naturalCorners = displayCorners.map(([x, y]) => [Math.round(x * scaleX), Math.round(y * scaleY)])
+            # where scaleX = naturalWidth / bounds.width, scaleY = naturalHeight / bounds.height
+            dst4 = np.array(user_conus_rect4, dtype=float)
+            print(f"  ✓ Destination corners (pixels from user's alignment):")
+            for i, corner in enumerate(dst4):
+                print(f"      Corner {i}: ({corner[0]:.2f}, {corner[1]:.2f})")
+            
+            # Compute homography matrix (EXACT same as interactive overlay)
+            # This maps shapefile geographic bounds → user's pixel rectangle
+            H = homography_from_4pts(src4, dst4)
+            print(f"  ✓ Homography matrix computed (same method as interactive overlay)")
+            
+            # Apply homography to all geometries (EXACT same as interactive overlay)
+            # This transforms the shapefile to match exactly where the user aligned it
+            gdf_conus_px = shp_conus.copy()
+            gdf_conus_px["geometry"] = gdf_conus_px.geometry.apply(
+                lambda geom: apply_homography_to_geometry(geom, H)
+            )
+            gdf_conus_px.crs = None
+            
+            # Verify transformed shapefile covers the user's rect4 area
+            tf_xmin, tf_ymin, tf_xmax, tf_ymax = gdf_conus_px.total_bounds
+            rect4_xmin = min(rect4_x_coords)
+            rect4_ymin = min(rect4_y_coords)
+            rect4_xmax = max(rect4_x_coords)
+            rect4_ymax = max(rect4_y_coords)
+            
+            print(f"\n  ✓✓✓ SUCCESS: Using user's manual alignment for processing")
+            print(f"    - User aligned rect4: {user_conus_rect4}")
+            print(f"    - User rect4 bounds: ({rect4_xmin:.1f}, {rect4_ymin:.1f}) to ({rect4_xmax:.1f}, {rect4_ymax:.1f})")
+            print(f"    - Transformed shapefile bounds: ({tf_xmin:.1f}, {tf_ymin:.1f}) to ({tf_xmax:.1f}, {tf_ymax:.1f})")
+            
+            # Check if transformed bounds match user's rect4 (should be very close)
+            tolerance = 5.0  # pixels
+            bounds_match = (
+                abs(tf_xmin - rect4_xmin) < tolerance and
+                abs(tf_ymin - rect4_ymin) < tolerance and
+                abs(tf_xmax - rect4_xmax) < tolerance and
+                abs(tf_ymax - rect4_ymax) < tolerance
+            )
+            if bounds_match:
+                print(f"    ✓ Transformed shapefile bounds match user's rect4 (within {tolerance}px)")
+            else:
+                print(f"    ⚠️  WARNING: Transformed shapefile bounds don't match user's rect4!")
+                print(f"       Difference: X={abs(tf_xmin - rect4_xmin):.1f}, Y={abs(tf_ymin - rect4_ymin):.1f}")
+            
+            print(f"    - This is the EXACT same transformation the user saw in the preview")
+            print(f"    - RGB extraction will use FULL IMAGE (not cropped) with this exact alignment\n")
+            aligned_regions.append(gdf_conus_px)
+            used_manual_alignment = True  # Flag: use full image for RGB extraction
+        except Exception as homography_err:
+            import traceback
+            error_trace = traceback.format_exc()
+            print(f"\n  ❌ ERROR in homography transformation:")
+            print(f"  Error: {str(homography_err)}")
+            print(f"  Traceback:\n{error_trace}")
+            raise ValueError(f"Failed to apply user's manual CONUS alignment: {str(homography_err)}")
     
     # 2. Align Alaska to its bounding box with affine transformation
     if has_alaska and "alaska" in shp_regions:
@@ -566,23 +689,36 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
 
     # Load image at natural size - NEVER resize
     img_full = np.array(Image.open(image_path).convert("RGB"))
-    # Extract crop region using numpy slicing (no resize, just extract subregion)
-    img_cropped_arr = img_full[y0:y1, x0:x1]
     
-    gdf_px_cropped = gdf_px.copy()
-    gdf_px_cropped["geometry"] = gdf_px_cropped.geometry.apply(
-        lambda g: shp_translate(g, xoff=-x0, yoff=-y0)
-    )
+    # CRITICAL: If user manually aligned, use FULL IMAGE (shapefile is already in full image coordinates)
+    # Otherwise, crop to detected bbox and translate shapefile
+    if used_manual_alignment:
+        print(f"\n  🔍 Using FULL IMAGE for RGB extraction (user's manual alignment)")
+        print(f"    - Shapefile is already in full image pixel coordinates")
+        print(f"    - No cropping or translation needed\n")
+        img_arr = img_full  # Use full image
+        gdf_px_for_rgb = gdf_px  # Use shapefile as-is (already in full image coords)
+    else:
+        print(f"\n  🔍 Using CROPPED IMAGE for RGB extraction (detected bbox)")
+        print(f"    - Cropping image to bbox: ({x0}, {y0}) to ({x1}, {y1})")
+        print(f"    - Translating shapefile by (-{x0}, -{y0})\n")
+        # Extract crop region using numpy slicing (no resize, just extract subregion)
+        img_arr = img_full[y0:y1, x0:x1]
+        gdf_px_for_rgb = gdf_px.copy()
+        gdf_px_for_rgb["geometry"] = gdf_px_for_rgb.geometry.apply(
+            lambda g: shp_translate(g, xoff=-x0, yoff=-y0)
+        )
 
     use_panel_fit = True
 
     results = []
     avg_rgbs = []
 
-    if use_panel_fit and gdf_px_cropped is not None and img_cropped_arr is not None:
-        h = img_cropped_arr.shape[0]
-        w = img_cropped_arr.shape[1]
-        for idx, row in gdf_px_cropped.iterrows():
+    if use_panel_fit and gdf_px_for_rgb is not None and img_arr is not None:
+        h = img_arr.shape[0]
+        w = img_arr.shape[1]
+        print(f"  RGB extraction: Image size = {w} x {h} pixels")
+        for idx, row in gdf_px_for_rgb.iterrows():
             geom = row.geometry
             gid = row["GEOID"]
 
@@ -610,7 +746,7 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
                 avg_rgbs.append([0, 0, 0])
                 continue
 
-            pixels = img_cropped_arr[ys, xs]
+            pixels = img_arr[ys, xs]
             mask_valid = ~(
                 ((pixels <= 5).all(axis=1)) | ((pixels >= 250).all(axis=1))
             )

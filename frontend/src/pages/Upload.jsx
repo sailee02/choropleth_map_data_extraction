@@ -907,6 +907,8 @@ export default function Upload({ onNavigateToHome }) {
       {showRegionSelector && uploadedImageUrl && (
         <RegionSelector
           imageUrl={uploadedImageUrl}
+          uploadId={uploadId}
+          projection={projection}
           onSelectionComplete={handleRegionSelection}
           onSkip={handleSkipRegions}
           onCancel={handleSkipRegions}

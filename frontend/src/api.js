@@ -34,6 +34,7 @@ export const uploadImage = (
     form.append("upload_id", uploadId);
   }
   if (regionSelections) {
+    console.log("🔍 DEBUG: Sending regionSelections to backend:", JSON.stringify(regionSelections, null, 2));
     form.append("region_selections", JSON.stringify(regionSelections));
   }
   
