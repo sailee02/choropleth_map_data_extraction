@@ -6,6 +6,7 @@ export default function AlaskaManualAlign({
   imageUrl, 
   uploadId, 
   projection = "4326",
+  initialAlaskaSelection = null, // {x, y, width, height, rect4} in natural image coordinates
   onConfirm, 
   onCancel 
 }) {
@@ -24,6 +25,8 @@ export default function AlaskaManualAlign({
   const imageRef = useRef(null);
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
+  const [zoomLevel, setZoomLevel] = useState(1); // Zoom level (1 = normal, >1 = zoomed in)
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 }); // Pan offset for zoomed view
 
   const MIN_SIZE = 40;
 
@@ -105,34 +108,74 @@ export default function AlaskaManualAlign({
     });
   };
 
-  // Initialize rectangle based on shapefile bounds
+  // Initialize rectangle based on user's selection or shapefile bounds, and zoom to it
   useEffect(() => {
     if (imageLoaded && imageRef.current && shapefileData && !rect) {
       const imgRect = imageRef.current.getBoundingClientRect();
+      const naturalWidth = imageRef.current.naturalWidth;
+      const naturalHeight = imageRef.current.naturalHeight;
       
-      const { bounds } = shapefileData;
-      const boundsWidth = bounds.xmax - bounds.xmin;
-      const boundsHeight = bounds.ymax - bounds.ymin;
-      
-      // Calculate initial scale to fit shapefile reasonably
-      const baseScale = Math.min(imgRect.width / boundsWidth, imgRect.height / boundsHeight) * 0.4;
-      
-      // Center of image
-      const centerX = imgRect.width / 2;
-      const centerY = imgRect.height / 2;
-      
-      const rectWidth = boundsWidth * baseScale;
-      const rectHeight = boundsHeight * baseScale;
-      
-      // Initialize as axis-aligned rectangle
-      setRect({
-        x: centerX - rectWidth / 2,
-        y: centerY - rectHeight / 2,
-        width: rectWidth,
-        height: rectHeight,
-      });
+      if (initialAlaskaSelection && initialAlaskaSelection.x !== undefined) {
+        // Use user's drawn rectangle
+        const scaleX = imgRect.width / naturalWidth;
+        const scaleY = imgRect.height / naturalHeight;
+        
+        const userRect = {
+          x: initialAlaskaSelection.x * scaleX,
+          y: initialAlaskaSelection.y * scaleY,
+          width: initialAlaskaSelection.width * scaleX,
+          height: initialAlaskaSelection.height * scaleY,
+        };
+        
+        setRect(userRect);
+        
+        // Zoom to the rectangle with padding (5cm equivalent ≈ 189px at 96dpi, but we'll use 200px for safety)
+        const padding = 200; // pixels of padding around the rectangle
+        const paddedWidth = userRect.width + (padding * 2);
+        const paddedHeight = userRect.height + (padding * 2);
+        
+        // Calculate zoom level to fit padded rectangle in viewport
+        const zoomX = imgRect.width / paddedWidth;
+        const zoomY = imgRect.height / paddedHeight;
+        const zoom = Math.min(zoomX, zoomY, 3); // Cap zoom at 3x
+        setZoomLevel(zoom);
+        
+        // Calculate pan offset to center the rectangle
+        const centerX = userRect.x + userRect.width / 2;
+        const centerY = userRect.y + userRect.height / 2;
+        const viewportCenterX = imgRect.width / 2;
+        const viewportCenterY = imgRect.height / 2;
+        
+        setPanOffset({
+          x: viewportCenterX - (centerX * zoom),
+          y: viewportCenterY - (centerY * zoom)
+        });
+      } else {
+        // Fallback: Initialize based on shapefile bounds
+        const { bounds } = shapefileData;
+        const boundsWidth = bounds.xmax - bounds.xmin;
+        const boundsHeight = bounds.ymax - bounds.ymin;
+        
+        // Calculate initial scale to fit shapefile reasonably
+        const baseScale = Math.min(imgRect.width / boundsWidth, imgRect.height / boundsHeight) * 0.4;
+        
+        // Center of image
+        const centerX = imgRect.width / 2;
+        const centerY = imgRect.height / 2;
+        
+        const rectWidth = boundsWidth * baseScale;
+        const rectHeight = boundsHeight * baseScale;
+        
+        // Initialize as axis-aligned rectangle
+        setRect({
+          x: centerX - rectWidth / 2,
+          y: centerY - rectHeight / 2,
+          width: rectWidth,
+          height: rectHeight,
+        });
+      }
     }
-  }, [imageLoaded, shapefileData, rect]);
+  }, [imageLoaded, shapefileData, rect, initialAlaskaSelection]);
 
   // Draw shapefile overlay
   useEffect(() => {
@@ -260,11 +303,12 @@ export default function AlaskaManualAlign({
 
     const handleMouseMove = (e) => {
       const bounds = imageRef.current.getBoundingClientRect();
-      let x = e.clientX - bounds.left;
-      let y = e.clientY - bounds.top;
+      // Account for zoom and pan
+      let x = (e.clientX - bounds.left - panOffset.x) / zoomLevel;
+      let y = (e.clientY - bounds.top - panOffset.y) / zoomLevel;
 
-      x = Math.max(0, Math.min(bounds.width, x));
-      y = Math.max(0, Math.min(bounds.height, y));
+      x = Math.max(0, Math.min(bounds.width / zoomLevel, x));
+      y = Math.max(0, Math.min(bounds.height / zoomLevel, y));
 
       setRect((prev) => {
         if (!prev) return prev;
@@ -345,8 +389,8 @@ export default function AlaskaManualAlign({
 
     const handleMouseMove = (e) => {
       const bounds = imageRef.current.getBoundingClientRect();
-      const cursorX = e.clientX - bounds.left;
-      const cursorY = e.clientY - bounds.top;
+      const cursorX = (e.clientX - bounds.left - panOffset.x) / zoomLevel;
+      const cursorY = (e.clientY - bounds.top - panOffset.y) / zoomLevel;
 
       // Calculate center of rectangle
       const centerX = rect.x + rect.width / 2;
@@ -402,8 +446,8 @@ export default function AlaskaManualAlign({
     if (draggingRotationHandle) return;
 
     const bounds = imageRef.current.getBoundingClientRect();
-    const cursorX = e.clientX - bounds.left;
-    const cursorY = e.clientY - bounds.top;
+    const cursorX = (e.clientX - bounds.left - panOffset.x) / zoomLevel;
+    const cursorY = (e.clientY - bounds.top - panOffset.y) / zoomLevel;
 
     // Check if click is inside the rotated rectangle
     if (isPointInRect(cursorX, cursorY)) {
@@ -422,8 +466,8 @@ export default function AlaskaManualAlign({
     const handleMouseMove = (e) => {
       if (!imageRef.current) return;
       const bounds = imageRef.current.getBoundingClientRect();
-      const cursorX = e.clientX - bounds.left;
-      const cursorY = e.clientY - bounds.top;
+      const cursorX = (e.clientX - bounds.left - panOffset.x) / zoomLevel;
+      const cursorY = (e.clientY - bounds.top - panOffset.y) / zoomLevel;
 
       const newCenterX = cursorX - dragStart.offsetX;
       const newCenterY = cursorY - dragStart.offsetY;
@@ -570,7 +614,7 @@ export default function AlaskaManualAlign({
             maxHeight: '60vh',
             border: '2px solid #e5e7eb',
             borderRadius: '8px',
-            overflow: 'visible',
+            overflow: 'hidden', // Changed to hidden to contain zoomed content
             cursor: rect ? (isDraggingShapefile ? 'grabbing' : 'grab') : 'default'
           }}
           onMouseDown={handleShapefileMouseDown}
@@ -617,7 +661,14 @@ export default function AlaskaManualAlign({
           )}
           
           {imageUrl && (
-            <>
+            <div style={{
+              position: 'relative',
+              width: '100%',
+              height: '100%',
+              transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
+              transformOrigin: '0 0',
+              transition: zoomLevel === 1 ? 'transform 0.3s ease' : 'none'
+            }}>
               <img
                 ref={imageRef}
                 src={imageUrl}
@@ -733,7 +784,7 @@ export default function AlaskaManualAlign({
                   />
                 </svg>
               )}
-            </>
+            </div>
           )}
         </div>
 

@@ -1,7 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ConusOverlayPreview from './ConusOverlayPreview';
 import ConusManualAlign from './ConusManualAlign';
+import ConusCountySelector from './ConusCountySelector';
 import AlaskaManualAlign from './AlaskaManualAlign';
+import AlaskaCountySelector from './AlaskaCountySelector';
+import HawaiiCountySelector from './HawaiiCountySelector';
 
 export default function RegionSelector({ imageUrl, uploadId, projection, onSelectionComplete, onCancel, onSkip }) {
   const [regions, setRegions] = useState({ conus: null, alaska: null, hawaii: null });
@@ -13,9 +16,11 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
   const [showConusPreview, setShowConusPreview] = useState(false);
   const [showConusManualAlign, setShowConusManualAlign] = useState(false);
   const [showAlaskaManualAlign, setShowAlaskaManualAlign] = useState(false);
+  const [showHawaiiCountySelector, setShowHawaiiCountySelector] = useState(false);
   const [conusOverlayParams, setConusOverlayParams] = useState(null);
   const imageRef = useRef(null);
   const containerRef = useRef(null);
+  const isProcessingRectangle = useRef(false);
 
   // Global mouse handlers to continue selection even when cursor goes outside
   useEffect(() => {
@@ -42,7 +47,11 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
       }
     };
 
-    const handleGlobalMouseUp = () => {
+    const handleGlobalMouseUp = (e) => {
+      // Don't process if already being handled by local handler or if mouse up happened on the image
+      if (isProcessingRectangle.current || (e.target === imageRef.current || imageRef.current?.contains(e.target))) {
+        return;
+      }
       if (isSelecting && startPoint && endPoint && currentRegion && imageRef.current) {
         const rect = imageRef.current.getBoundingClientRect();
         const left = Math.min(startPoint.x, endPoint.x);
@@ -89,13 +98,10 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
             [currentRegion]: imageSelection
           }));
           
-          // If CONUS was just selected, show manual alignment
-          if (currentRegion === 'conus') {
-            setShowConusManualAlign(true);
-          }
-          // If Alaska was just selected, show manual alignment
-          if (currentRegion === 'alaska') {
-            setShowAlaskaManualAlign(true);
+          // If Hawaii was just selected, show county selector
+          if (currentRegion === 'hawaii') {
+            console.log('Hawaii rectangle selected (global handler), showing HawaiiCountySelector. uploadId:', uploadId);
+            setShowHawaiiCountySelector(true);
           }
         }
         
@@ -118,7 +124,8 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
   }, [isSelecting, startPoint, endPoint, currentRegion]);
 
   const handleMouseDown = (e) => {
-    if (!imageRef.current || !currentRegion) return;
+    // Only allow rectangle selection for Hawaii
+    if (!imageRef.current || currentRegion !== 'hawaii') return;
     
     const rect = imageRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -159,8 +166,9 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
   };
 
   const handleMouseUp = () => {
-    if (!isSelecting || !startPoint || !endPoint || !currentRegion) return;
+    if (!isSelecting || !startPoint || !endPoint || !currentRegion || isProcessingRectangle.current) return;
     
+    isProcessingRectangle.current = true;
     setIsSelecting(false);
     
     const left = Math.min(startPoint.x, endPoint.x);
@@ -202,9 +210,10 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
           [currentRegion]: imageSelection
         }));
         
-        // If CONUS was just selected, show overlay preview
-        if (currentRegion === 'conus') {
-          setShowConusPreview(true);
+        // If Hawaii was just selected, show county selector
+        if (currentRegion === 'hawaii') {
+          console.log('Hawaii rectangle selected, showing HawaiiCountySelector. uploadId:', uploadId);
+          setShowHawaiiCountySelector(true);
         }
       
       setStartPoint(null);
@@ -215,6 +224,10 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
       setStartPoint(null);
       setEndPoint(null);
     }
+    // Reset the flag after a short delay to allow state updates to complete
+    setTimeout(() => {
+      isProcessingRectangle.current = false;
+    }, 100);
   };
 
   const handleMouseLeave = () => {
@@ -272,17 +285,23 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
     }
     
     // Create a CONUS region entry with the user's manually aligned rect4
+    const conusData = {
+      x: x,
+      y: y,
+      width: width,
+      height: height,
+      rect4: userRect4, // User's manually aligned rectangle
+      alignmentParams: alignmentParams // Store full alignment params for backend
+    };
+    
     setRegions(prev => ({
       ...prev,
-      conus: {
-        x: x,
-        y: y,
-        width: width,
-        height: height,
-        rect4: userRect4, // User's manually aligned rectangle
-        alignmentParams: alignmentParams // Store full alignment params for backend
-      }
+      conus: conusData
     }));
+    
+    // DON'T call onSelectionComplete here - that would close the RegionSelector
+    // Just update local state. The user can continue to mark Alaska/Hawaii
+    // onSelectionComplete will be called when user clicks "Confirm & Continue"
   };
 
   const handleConusManualAlignCancel = () => {
@@ -309,21 +328,49 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
     }
     
     // Create an Alaska region entry with the user's manually aligned rect4
+    const alaskaData = {
+      x: x,
+      y: y,
+      width: width,
+      height: height,
+      rect4: userRect4, // User's manually aligned rectangle
+      alignmentParams: alignmentParams // Store full alignment params for backend
+    };
+    
     setRegions(prev => ({
       ...prev,
-      alaska: {
-        x: x,
-        y: y,
-        width: width,
-        height: height,
-        rect4: userRect4, // User's manually aligned rectangle
-        alignmentParams: alignmentParams // Store full alignment params for backend
-      }
+      alaska: alaskaData
     }));
+    
+    // DON'T call onSelectionComplete here - that would close the RegionSelector
+    // Just update local state. The user can continue to mark Hawaii
+    // onSelectionComplete will be called when user clicks "Confirm & Continue"
   };
 
   const handleAlaskaManualAlignCancel = () => {
     setShowAlaskaManualAlign(false);
+  };
+
+  const handleHawaiiCountySelectorConfirm = (hawaiiData) => {
+    // Store Hawaii county selections with RGB values
+    setShowHawaiiCountySelector(false);
+    
+    // Update regions with Hawaii data including county selections
+    setRegions(prev => ({
+      ...prev,
+      hawaii: {
+        ...prev.hawaii,
+        countySelections: hawaiiData.hawaiiCounties
+      }
+    }));
+    
+    // DON'T call onSelectionComplete here - that would close the RegionSelector
+    // Just update local state. The user can review and click "Confirm & Continue"
+    // onSelectionComplete will be called when user clicks "Confirm & Continue"
+  };
+
+  const handleHawaiiCountySelectorCancel = () => {
+    setShowHawaiiCountySelector(false);
   };
 
   const handleClearRegion = (region) => {
@@ -358,6 +405,11 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
     const selection = regions[region];
     if (!selection || !imageRef.current) return null;
     
+    // Hide CONUS rectangle when marking Alaska
+    if (region === 'conus' && currentRegion === 'alaska') {
+      return null;
+    }
+    
     const rect = imageRef.current.getBoundingClientRect();
     const imageWidth = imageRef.current.naturalWidth;
     const imageHeight = imageRef.current.naturalHeight;
@@ -385,28 +437,86 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
 
   const hasAnySelection = regions.conus || regions.alaska || regions.hawaii;
 
-  // Show CONUS manual alignment if requested
-  if (showConusManualAlign && uploadId) {
+  // Show CONUS county selector if requested
+  if (showConusManualAlign) {
+    console.log('Rendering ConusCountySelector. showConusManualAlign:', showConusManualAlign, 'uploadId:', uploadId, 'regions.conus:', regions.conus);
+    if (!uploadId) {
+      console.error("ConusCountySelector requires uploadId but it's not available");
+      return (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          zIndex: 10000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: 'white'
+        }}>
+          <div>Error: Upload ID not available. Please upload an image first.</div>
+        </div>
+      );
+    }
     return (
-      <ConusManualAlign
+      <ConusCountySelector
         imageUrl={imageUrl}
         uploadId={uploadId}
         projection={projection || "4326"}
+        initialConusSelection={regions.conus || null}
         onConfirm={handleConusManualAlignConfirm}
         onCancel={handleConusManualAlignCancel}
       />
     );
   }
 
-  // Show Alaska manual alignment if requested
-  if (showAlaskaManualAlign && uploadId) {
+  // Show Alaska county selector if requested
+  if (showAlaskaManualAlign) {
+    console.log('Rendering AlaskaCountySelector. showAlaskaManualAlign:', showAlaskaManualAlign, 'uploadId:', uploadId, 'regions.alaska:', regions.alaska);
+    if (!uploadId) {
+      console.error("AlaskaCountySelector requires uploadId but it's not available");
+      return (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          zIndex: 10000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: 'white'
+        }}>
+          <div>Error: Upload ID not available. Please upload an image first.</div>
+        </div>
+      );
+    }
     return (
-      <AlaskaManualAlign
+      <AlaskaCountySelector
         imageUrl={imageUrl}
         uploadId={uploadId}
         projection={projection || "4326"}
+        initialAlaskaSelection={regions.alaska || null}
         onConfirm={handleAlaskaManualAlignConfirm}
         onCancel={handleAlaskaManualAlignCancel}
+      />
+    );
+  }
+
+  // Show Hawaii county selector if requested
+  if (showHawaiiCountySelector) {
+    console.log('Rendering HawaiiCountySelector. showHawaiiCountySelector:', showHawaiiCountySelector, 'uploadId:', uploadId, 'regions.hawaii:', regions.hawaii);
+    return (
+      <HawaiiCountySelector
+        imageUrl={imageUrl}
+        uploadId={uploadId}
+        hawaiiSelection={regions.hawaii}
+        onConfirm={handleHawaiiCountySelectorConfirm}
+        onCancel={handleHawaiiCountySelectorCancel}
       />
     );
   }
@@ -466,11 +576,11 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
           textAlign: 'center',
           maxWidth: '500px'
         }}>
-          Click "Mark CONUS" to align the shapefile overlay manually.
+          Click "Mark CONUS" to select alignment points for CONUS.
           <br />
-          Click "Mark Alaska" to align Alaska shapefile manually.
+          Click "Mark Alaska" to select alignment points for Alaska.
           <br />
-          Optionally mark Hawaii region using the crosshair guides.
+          Click "Mark Hawaii" to draw a rectangle around Hawaii, then select counties.
         </p>
 
         {/* Region buttons */}
@@ -483,17 +593,18 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
         }}>
           <button
             onClick={() => {
-              if (currentRegion === 'conus') {
-                setCurrentRegion(null);
-                setCursorPos(null);
-              } else {
-                // Show manual alignment for CONUS
+              // For CONUS, directly show county selector (skip rectangle selection)
+              if (!regions.conus) {
+                console.log('Mark CONUS clicked, showing ConusCountySelector directly. uploadId:', uploadId);
                 setShowConusManualAlign(true);
+              } else {
+                // If already marked, allow toggling off
+                setRegions(prev => ({ ...prev, conus: null }));
               }
             }}
             style={{
-              backgroundColor: currentRegion === 'conus' ? '#ef4444' : regions.conus ? '#fca5a5' : '#e5e7eb',
-              color: currentRegion === 'conus' || regions.conus ? 'white' : '#666',
+              backgroundColor: regions.conus ? '#fca5a5' : '#ef4444',
+              color: 'white',
               border: 'none',
               padding: '8px 16px',
               borderRadius: '6px',
@@ -508,17 +619,18 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
           
           <button
             onClick={() => {
-              if (currentRegion === 'alaska') {
-                setCurrentRegion(null);
-                setCursorPos(null);
-              } else {
-                // Show manual alignment for Alaska
+              // For Alaska, directly show county selector (skip rectangle selection)
+              if (!regions.alaska) {
+                console.log('Mark Alaska clicked, showing AlaskaCountySelector directly. uploadId:', uploadId);
                 setShowAlaskaManualAlign(true);
+              } else {
+                // If already marked, allow toggling off
+                setRegions(prev => ({ ...prev, alaska: null }));
               }
             }}
             style={{
-              backgroundColor: currentRegion === 'alaska' ? '#3b82f6' : regions.alaska ? '#93c5fd' : '#e5e7eb',
-              color: currentRegion === 'alaska' || regions.alaska ? 'white' : '#666',
+              backgroundColor: regions.alaska ? '#93c5fd' : '#3b82f6',
+              color: 'white',
               border: 'none',
               padding: '8px 16px',
               borderRadius: '6px',
@@ -553,14 +665,14 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
           </button>
         </div>
 
-        {currentRegion && (
+        {currentRegion === 'hawaii' && (
           <p style={{
             margin: '0 0 12px 0',
-            color: currentRegion === 'conus' ? '#ef4444' : currentRegion === 'alaska' ? '#3b82f6' : '#10b981',
+            color: '#10b981',
             fontSize: '13px',
             fontWeight: '500'
           }}>
-            Click and drag to mark {currentRegion === 'conus' ? 'CONUS' : currentRegion === 'alaska' ? 'Alaska' : 'Hawaii'} region
+            Click and drag to mark Hawaii region
             <br />
             <span style={{ fontSize: '11px', fontWeight: '400' }}>Crosshair guides will help you align precisely</span>
           </p>

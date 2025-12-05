@@ -125,7 +125,92 @@ def generate_data_driven_legend(rgb_values, n_bins=64):
 def rgb_leg(rgb_values, n_bins=64):
     return generate_data_driven_legend(rgb_values, n_bins)
 
-def extract_legend_from_selection(image_path, legend_selection):
+def _extract_bin_values_from_legend(legend_area, num_bins):
+    """
+    Extract all bin values from binned legend area using OCR.
+    For binned legends, we need to extract the actual value ranges or values for each bin.
+    Returns list of values (one per bin) or None if extraction fails.
+    """
+    try:
+        import pytesseract
+        from PIL import Image as PILImage
+        import re
+        
+        # Convert numpy array to PIL Image
+        legend_img = PILImage.fromarray(legend_area)
+        
+        # Use OCR to extract text - try different PSM modes for better results
+        text = pytesseract.image_to_string(legend_img, config='--psm 6')
+        print(f"  📖 OCR extracted text (PSM 6): {text[:200]}...")  # Print first 200 chars
+        
+        # Also try vertical text detection if horizontal doesn't work well
+        if len(text.strip()) < 10:
+            text = pytesseract.image_to_string(legend_img, config='--psm 5')
+            print(f"  📖 OCR extracted text (PSM 5): {text[:200]}...")  # Print first 200 chars
+        
+        # Find all numbers in the text (including decimals and ranges like "1.30-4.50" or "0% to 22.2%")
+        # First, try to find percentage ranges (e.g., "0% to 22.2%", "22.3% to 35.3%")
+        percent_range_pattern = r'(\d+\.?\d*)\s*%\s*(?:to|–|-|—)\s*(\d+\.?\d*)\s*%'
+        percent_ranges = re.findall(percent_range_pattern, text, re.IGNORECASE)
+        
+        if percent_ranges and len(percent_ranges) >= num_bins:
+            # Extract values from percentage ranges - use the upper bound
+            bin_values = []
+            for low, high in percent_ranges[:num_bins]:
+                low_val = float(low)
+                high_val = float(high)
+                # Use the upper bound (high value) for each bin
+                bin_values.append(high_val)
+            print(f"  ✓ Extracted {len(bin_values)} bin values from percentage ranges: {bin_values}")
+            return bin_values
+        
+        # Try regular ranges (e.g., "1.30-4.50")
+        range_pattern = r'(\d+\.?\d*)\s*[-–—]\s*(\d+\.?\d*)'
+        ranges = re.findall(range_pattern, text)
+        
+        if ranges and len(ranges) >= num_bins:
+            # Extract values from ranges - use the midpoint or the upper bound
+            bin_values = []
+            for low, high in ranges[:num_bins]:
+                low_val = float(low)
+                high_val = float(high)
+                # Use the upper bound (high value) for each bin, or midpoint
+                # For binned legends, typically the upper bound represents the bin
+                bin_values.append(high_val)
+            print(f"  ✓ Extracted {len(bin_values)} bin values from legend ranges: {bin_values}")
+            return bin_values
+        
+        # If no ranges found, try to find all numbers and assign them to bins
+        numbers = re.findall(r'-?\d+\.?\d*', text)
+        if len(numbers) >= num_bins:
+            # Convert to floats and take the first num_bins values
+            values = [float(n) for n in numbers[:num_bins]]
+            print(f"  ✓ Extracted {len(values)} bin values from legend: {values}")
+            return values
+        elif len(numbers) >= 2:
+            # If we have at least 2 numbers, use them as min/max and interpolate
+            values = [float(n) for n in numbers]
+            min_val = min(values)
+            max_val = max(values)
+            # Interpolate values for each bin
+            bin_values = []
+            for i in range(num_bins):
+                if num_bins > 1:
+                    value = min_val + (max_val - min_val) * (i / (num_bins - 1))
+                else:
+                    value = min_val
+                bin_values.append(value)
+            print(f"  ✓ Extracted min/max ({min_val}, {max_val}) and interpolated {num_bins} bin values: {bin_values}")
+            return bin_values
+    except ImportError:
+        print("  ⚠️  pytesseract not available, cannot extract bin values from legend")
+    except Exception as e:
+        print(f"  ⚠️  Failed to extract bin values from legend: {str(e)}")
+    
+    return None
+
+
+def extract_legend_from_selection(image_path, legend_selection, legend_type_info=None):
     if not legend_selection:
         return None
     
@@ -147,37 +232,139 @@ def extract_legend_from_selection(image_path, legend_selection):
     
     legend_area = img_arr[y:y+height, x:x+width]
     
-    # Find unique colors in the legend area
-    # Reshape to get all pixels
-    pixels = legend_area.reshape(-1, 3)
-    
-    # Find unique colors (with some tolerance for noise)
-    unique_colors = []
-    for pixel in pixels:
-        # Check if this color is similar to any existing color
-        is_unique = True
-        for existing_color in unique_colors:
-            # Calculate color distance
-            distance = np.sqrt(np.sum((pixel - existing_color) ** 2))
-            if distance < 30:  # Tolerance threshold
-                is_unique = False
-                break
-        if is_unique:
-            unique_colors.append(pixel)
-    
-    # Sort colors by brightness (luminance)
-    def luminance(rgb):
-        return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-    
-    unique_colors.sort(key=luminance, reverse=True)
-    
-    # Create legend with labels
-    legend = []
-    for i, color in enumerate(unique_colors):
-        label = f"Level {i + 1}"
-        legend.append((color.tolist(), label))
-    
-    return legend if len(legend) >= 2 else None
+    if legend_type_info and legend_type_info.get('type') == 'continuous':
+        # For continuous legend, sample colors along the gradient
+        # Assume legend is vertical (top to bottom) or horizontal (left to right)
+        is_vertical = height > width
+        
+        if is_vertical:
+            # Sample along vertical axis (top = max, bottom = min)
+            num_samples = 100  # Sample many points for smooth gradient
+            step = max(1, height // num_samples)
+            colors = []
+            for i in range(0, height, step):
+                row = legend_area[i, :]
+                # Get average color of this row
+                avg_color = row.mean(axis=0).astype(int)
+                colors.append(avg_color.tolist())
+        else:
+            # Sample along horizontal axis (left = min, right = max)
+            num_samples = 100
+            step = max(1, width // num_samples)
+            colors = []
+            for i in range(0, width, step):
+                col = legend_area[:, i]
+                # Get average color of this column
+                avg_color = col.mean(axis=0).astype(int)
+                colors.append(avg_color.tolist())
+        
+        # Remove duplicates (with tolerance)
+        unique_colors = []
+        for color in colors:
+            is_unique = True
+            for existing in unique_colors:
+                distance = np.sqrt(np.sum((np.array(color) - np.array(existing)) ** 2))
+                if distance < 20:  # Tolerance
+                    is_unique = False
+                    break
+            if is_unique:
+                unique_colors.append(color)
+        
+        # Reverse if needed (so first color = max, last = min for vertical)
+        if is_vertical:
+            unique_colors = unique_colors[::-1]
+        
+        # Create legend with interpolated values
+        min_val = legend_type_info.get('minValue', 0)
+        max_val = legend_type_info.get('maxValue', 100)
+        legend = []
+        for i, color in enumerate(unique_colors):
+            # Interpolate value based on position
+            if len(unique_colors) > 1:
+                value = min_val + (max_val - min_val) * (i / (len(unique_colors) - 1))
+            else:
+                value = min_val
+            legend.append((color, value))
+        
+        return legend if len(legend) >= 2 else None
+    else:
+        # For binned legend, find distinct colors and extract min/max values
+        pixels = legend_area.reshape(-1, 3)
+        
+        # Find unique colors (with some tolerance for noise)
+        unique_colors = []
+        for pixel in pixels:
+            # Check if this color is similar to any existing color
+            is_unique = True
+            for existing_color in unique_colors:
+                # Calculate color distance
+                distance = np.sqrt(np.sum((pixel - existing_color) ** 2))
+                if distance < 30:  # Tolerance threshold
+                    is_unique = False
+                    break
+            if is_unique:
+                unique_colors.append(pixel)
+        
+        # Sort colors by brightness (luminance)
+        def luminance(rgb):
+            return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        
+        unique_colors.sort(key=luminance, reverse=True)
+        
+        # Limit to requested number of bins if specified
+        num_bins = len(unique_colors)
+        if legend_type_info and legend_type_info.get('type') == 'binned':
+            num_bins = legend_type_info.get('numBins', len(unique_colors))
+            if len(unique_colors) > num_bins:
+                # Sample evenly
+                step = len(unique_colors) / num_bins
+                unique_colors = [unique_colors[int(i * step)] for i in range(num_bins)]
+        
+        # Extract actual bin values from legend using OCR
+        bin_values = _extract_bin_values_from_legend(legend_area, num_bins)
+        
+        # Create legend with labels and values
+        # Colors are sorted by brightness (brightest first)
+        # Extracted bin values should match the visual order in the legend
+        # For typical binned legends: light colors = low values, dark colors = high values
+        # So we may need to reverse the order if values are extracted in ascending order
+        legend = []
+        for i, color in enumerate(unique_colors):
+            label = f"Bin {i + 1}"
+            # Use extracted bin value if available
+            if bin_values and len(bin_values) == num_bins:
+                # Use the value at index i (matching the color order)
+                value = float(bin_values[i])
+                print(f"    Bin {i+1}: Using extracted value {value}")
+            elif bin_values and len(bin_values) > 0:
+                # If we have some values but not enough, use what we have
+                if i < len(bin_values):
+                    value = float(bin_values[i])
+                    print(f"    Bin {i+1}: Using extracted value {value} (from partial extraction)")
+                else:
+                    # Interpolate remaining values
+                    if len(bin_values) >= 2:
+                        min_val = min(bin_values)
+                        max_val = max(bin_values)
+                        # Interpolate based on position
+                        value = float(min_val + (max_val - min_val) * (i / (num_bins - 1)))
+                        print(f"    Bin {i+1}: Interpolated value {value}")
+                    else:
+                        value = float(bin_values[0]) if bin_values else float(i)
+                        print(f"    Bin {i+1}: Using single extracted value {value}")
+            else:
+                value = float(i)  # Fallback to bin index (but as float for consistency)
+                print(f"    Bin {i+1}: No OCR values, using bin index {value} as fallback")
+            legend.append((color.tolist(), label, value))
+        
+        # Store extracted values in legend_type_info for later use (if available)
+        if bin_values and legend_type_info is not None:
+            legend_type_info['binValues'] = bin_values
+            if len(bin_values) >= 2:
+                legend_type_info['minValue'] = min(bin_values)
+                legend_type_info['maxValue'] = max(bin_values)
+        
+        return legend if len(legend) >= 2 else None
 
 
 def _ensure_shapefile_exists():
@@ -207,7 +394,7 @@ def _raster_transform_for_image_and_shp(shp, img_w, img_h):
     return from_bounds(minx, miny, maxx, maxy, img_w, img_h)
 
 
-def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", legend_selection=None, n_bins=64, upload_id=None, region_selections=None, projection="4326"):
+def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", legend_selection=None, n_bins=64, upload_id=None, region_selections=None, projection="4326", legend_type_info=None):
     """
     1. Load shapefile (CONUS-only or full with Alaska/Hawaii based on region_selections)
     2. Rasterize each county into the image pixel grid
@@ -306,6 +493,53 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
         county_df['fips_padded'] = county_df['fips'].str.zfill(5)
         county_names = dict(zip(county_df['fips_padded'], county_df['name']))
         state_names = dict(zip(county_df['fips_padded'], county_df['state']))
+    
+    # Fallback: Extract county and state names from shapefile if available
+    # Check the first region's shapefile for column names
+    if shp_regions:
+        first_region = list(shp_regions.keys())[0]
+        first_shp = shp_regions[first_region]
+        if "NAME" in first_shp.columns:
+            # Build county name map from shapefile
+            for region, shp_region in shp_regions.items():
+                if "NAME" in shp_region.columns and "GEOID" in shp_region.columns:
+                    for _, row in shp_region.iterrows():
+                        geoid = str(row["GEOID"]).zfill(5)
+                        if geoid not in county_names:
+                            county_names[geoid] = row["NAME"]
+        
+        # Try to get state names from shapefile (check for STATE_NAME, STUSPS, or NAME columns)
+        # We need to map GEOID to state - GEOID first 2 digits are state FIPS
+        if "STUSPS" in first_shp.columns or "STATE_NAME" in first_shp.columns:
+            # Create state FIPS to state name mapping
+            state_fips_to_name = {}
+            for region, shp_region in shp_regions.items():
+                if "GEOID" in shp_region.columns:
+                    for _, row in shp_region.iterrows():
+                        geoid = str(row["GEOID"]).zfill(5)
+                        state_fips = geoid[:2]
+                        if state_fips not in state_fips_to_name:
+                            if "STATE_NAME" in row:
+                                state_fips_to_name[state_fips] = row["STATE_NAME"]
+                            elif "STUSPS" in row:
+                                # Use state abbreviation, but we need full name
+                                # For now, use abbreviation as fallback
+                                state_fips_to_name[state_fips] = row.get("STUSPS", "")
+            
+            # Map GEOID to state name using state FIPS
+            for region, shp_region in shp_regions.items():
+                if "GEOID" in shp_region.columns:
+                    for _, row in shp_region.iterrows():
+                        geoid = str(row["GEOID"]).zfill(5)
+                        if geoid not in state_names:
+                            state_fips = geoid[:2]
+                            if state_fips in state_fips_to_name:
+                                state_names[geoid] = state_fips_to_name[state_fips]
+                            elif "STATE_NAME" in row:
+                                state_names[geoid] = row["STATE_NAME"]
+                            elif "STUSPS" in row:
+                                # Use state abbreviation as fallback
+                                state_names[geoid] = row["STUSPS"]
 
     # Load image at natural size - NEVER resize
     img = Image.open(image_path).convert("RGB")  # convert() only changes color space, not size
@@ -411,15 +645,28 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
     if not isinstance(conus_selection, dict):
         raise ValueError(f"❌ ERROR: CONUS selection must be a dict, got {type(conus_selection)}")
     
+    # Check for TPS transformation data first (from 4-point county alignment)
+    use_tps = False
+    tps_src_points = None
+    tps_dst_points = None
+    
     # Check for rect4 from manual alignment (multiple possible locations)
     if conus_selection.get("rect4"):
         user_conus_rect4 = conus_selection["rect4"]
         print(f"  ✓✓✓ FOUND: Using user's manually aligned CONUS rect4: {user_conus_rect4}")
     elif conus_selection.get("alignmentParams"):
         alignment_params = conus_selection["alignmentParams"]
-        if isinstance(alignment_params, dict) and alignment_params.get("rect4"):
-            user_conus_rect4 = alignment_params["rect4"]
-            print(f"  ✓✓✓ FOUND: Using user's manually aligned CONUS rect4 from alignmentParams: {user_conus_rect4}")
+        if isinstance(alignment_params, dict):
+            if alignment_params.get("rect4"):
+                user_conus_rect4 = alignment_params["rect4"]
+                print(f"  ✓✓✓ FOUND: Using user's manually aligned CONUS rect4 from alignmentParams: {user_conus_rect4}")
+            # Check for TPS transformation data
+            if alignment_params.get("transform_type") == "tps":
+                tps_src_points = alignment_params.get("tps_src_points")
+                tps_dst_points = alignment_params.get("tps_dst_points")
+                if tps_src_points and tps_dst_points:
+                    use_tps = True
+                    print(f"  ✓✓✓ FOUND: TPS transformation data in alignmentParams")
     elif conus_selection.get("overlayParams"):
         overlay_params = conus_selection["overlayParams"]
         if isinstance(overlay_params, dict) and overlay_params.get("rect4"):
@@ -438,24 +685,29 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
         if not isinstance(corner, (list, tuple)) or len(corner) != 2:
             raise ValueError(f"❌ ERROR: CONUS rect4 corner {i} must be [x, y], got: {corner}")
     
-    # Use homography transformation with user's manually aligned rect4
+    # Use TPS or homography transformation with user's manually aligned rect4
     if True:  # Always use user's rect4 - no fallback
-        # Use homography transformation with user's manually aligned rect4
         # IMPORTANT: Use the EXACT same transformation as the interactive overlay preview
         # The user aligned the shapefile on the displayed image, and we need to use
         # the EXACT same image (no scaling) and EXACT same transformation
         try:
-            from utils.homography import (
-                rect_bounds_to_corners,
-                homography_from_4pts,
-                apply_homography_to_geometry
-            )
+            if use_tps:
+                from utils.tps import tps_transform_from_points, apply_tps_to_geometry
+            else:
+                from utils.homography import (
+                    rect_bounds_to_corners,
+                    homography_from_4pts,
+                    apply_homography_to_geometry
+                )
         except ImportError:
-            from backend.utils.homography import (
-                rect_bounds_to_corners,
-                homography_from_4pts,
-                apply_homography_to_geometry
-            )
+            if use_tps:
+                from backend.utils.tps import tps_transform_from_points, apply_tps_to_geometry
+            else:
+                from backend.utils.homography import (
+                    rect_bounds_to_corners,
+                    homography_from_4pts,
+                    apply_homography_to_geometry
+                )
         
         try:
             # Verify image dimensions match (user aligned on this exact image)
@@ -514,18 +766,36 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
             for i, corner in enumerate(dst4):
                 print(f"      Corner {i}: ({corner[0]:.2f}, {corner[1]:.2f})")
             
-            # Compute homography matrix (EXACT same as interactive overlay)
-            # This maps shapefile geographic bounds → user's pixel rectangle
-            H = homography_from_4pts(src4, dst4)
-            print(f"  ✓ Homography matrix computed (same method as interactive overlay)")
-            
-            # Apply homography to all geometries (EXACT same as interactive overlay)
-            # This transforms the shapefile to match exactly where the user aligned it
-            gdf_conus_px = shp_conus.copy()
-            gdf_conus_px["geometry"] = gdf_conus_px.geometry.apply(
-                lambda geom: apply_homography_to_geometry(geom, H)
-            )
-            gdf_conus_px.crs = None
+            # Use TPS if available, otherwise use homography
+            if use_tps and tps_src_points and tps_dst_points:
+                print(f"  ✓ Using Thin-Plate Spline (TPS) transformation for non-linear warping")
+                print(f"  ✓ Shapefile is already in EPSG:5070 (flat projection) - good for TPS")
+                
+                # Reconstruct TPS function from stored points
+                tps_src_array = np.array(tps_src_points, dtype=float)
+                tps_dst_array = np.array(tps_dst_points, dtype=float)
+                tps_func = tps_transform_from_points(tps_src_array, tps_dst_array)
+                
+                # Apply TPS to all geometries
+                gdf_conus_px = shp_conus.copy()
+                gdf_conus_px["geometry"] = gdf_conus_px.geometry.apply(
+                    lambda geom: apply_tps_to_geometry(geom, tps_func)
+                )
+                gdf_conus_px.crs = None
+                print(f"  ✓ TPS transformation applied to all geometries")
+            else:
+                # Compute homography matrix (EXACT same as interactive overlay)
+                # This maps shapefile geographic bounds → user's pixel rectangle
+                H = homography_from_4pts(src4, dst4)
+                print(f"  ✓ Homography matrix computed (same method as interactive overlay)")
+                
+                # Apply homography to all geometries (EXACT same as interactive overlay)
+                # This transforms the shapefile to match exactly where the user aligned it
+                gdf_conus_px = shp_conus.copy()
+                gdf_conus_px["geometry"] = gdf_conus_px.geometry.apply(
+                    lambda geom: apply_homography_to_geometry(geom, H)
+                )
+                gdf_conus_px.crs = None
             
             # Verify transformed shapefile covers the user's rect4 area
             tf_xmin, tf_ymin, tf_xmax, tf_ymax = gdf_conus_px.total_bounds
@@ -903,16 +1173,71 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
 
     all_rgb_values = [r["rgb"] for r in results]
     user_legend = None
+    is_continuous = legend_type_info and legend_type_info.get('type') == 'continuous'
     
     if legend_selection:
-        user_legend = extract_legend_from_selection(image_path, legend_selection)
+        user_legend = extract_legend_from_selection(image_path, legend_selection, legend_type_info)
     
     if user_legend and len(user_legend) >= 2:
-        legend_colors = np.array([rgb for rgb, _ in user_legend])
-        legend_labels = [label for _, label in user_legend]
+        if is_continuous:
+            # For continuous: legend is [(rgb, value), ...]
+            legend_colors = np.array([rgb for rgb, _ in user_legend])
+            legend_values = [value for _, value in user_legend]
+            legend_labels = [f"{value:.2f}" for _, value in user_legend]
+        else:
+            # For binned: legend is [(rgb, label, value), ...] or [(rgb, label), ...]
+            # Check if values are included (from OCR extraction)
+            if len(user_legend[0]) == 3:
+                legend_colors = np.array([rgb for rgb, _, _ in user_legend])
+                legend_labels = [label for _, label, _ in user_legend]
+                legend_values = [value for _, _, value in user_legend]
+                print(f"  ✓ Using extracted bin values from legend: {legend_values}")
+            else:
+                legend_colors = np.array([rgb for rgb, _ in user_legend])
+                legend_labels = [label for _, label in user_legend]
+                # Try to get bin values from legend_type_info first (from OCR extraction)
+                if legend_type_info and legend_type_info.get('binValues'):
+                    bin_values = legend_type_info.get('binValues')
+                    if len(bin_values) == len(legend_colors):
+                        legend_values = bin_values
+                        print(f"  ✓ Using bin values from legend_type_info: {legend_values}")
+                    elif len(bin_values) > 0:
+                        # Interpolate if we have some values
+                        min_val = min(bin_values)
+                        max_val = max(bin_values)
+                        num_bins = len(legend_colors)
+                        legend_values = []
+                        for i in range(num_bins):
+                            if num_bins > 1:
+                                value = min_val + (max_val - min_val) * (i / (num_bins - 1))
+                            else:
+                                value = min_val
+                            legend_values.append(value)
+                        print(f"  ✓ Interpolated {num_bins} values from extracted bin values: {legend_values}")
+                    else:
+                        legend_values = None
+                # Compute values for binned legend (interpolate between min and max)
+                if not legend_values and legend_type_info and legend_type_info.get('minValue') is not None and legend_type_info.get('maxValue') is not None:
+                    min_val = legend_type_info.get('minValue')
+                    max_val = legend_type_info.get('maxValue')
+                    num_bins = len(legend_colors)
+                    # Interpolate values: bin 0 = min, bin (num_bins-1) = max
+                    legend_values = []
+                    for i in range(num_bins):
+                        if num_bins > 1:
+                            value = min_val + (max_val - min_val) * (i / (num_bins - 1))
+                        else:
+                            value = min_val
+                        legend_values.append(value)
+                    print(f"  ✓ Interpolated values from min/max: {legend_values}")
+                if not legend_values:
+                    # Fallback: use bin indices as values
+                    legend_values = list(range(len(legend_colors)))
+                    print(f"  ⚠️  No bin values extracted, using bin indices as values: {legend_values}")
     else:
         legend_colors = rgb_leg(all_rgb_values, n_bins)
         legend_labels = [f"Bin {i+1}" for i in range(len(legend_colors))]
+        legend_values = None
 
     rgb_array = np.array([r["rgb"] for r in results if r["rgb"][0] is not None])
     if len(rgb_array) > 0 and len(legend_colors) > 0:
@@ -920,24 +1245,62 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
         result_idx = 0
         for r in results:
             if r["rgb"][0] is not None:
-                r["bin_index"] = int(bin_indices[result_idx])
+                bin_idx = int(bin_indices[result_idx])
+                r["bin_index"] = bin_idx
+                # Assign value for both continuous and binned legends
+                if legend_values is not None and len(legend_values) > 0 and bin_idx < len(legend_values):
+                    r["value"] = legend_values[bin_idx]
+                else:
+                    # Fallback: use bin index as value if no legend values available
+                    r["value"] = bin_idx if legend_values is None else None
+                    if legend_values is None:
+                        print(f"  ⚠️  Warning: No legend_values available for bin_idx {bin_idx}, using bin index as value")
                 result_idx += 1
             else:
                 r["bin_index"] = None
+                r["value"] = None
     else:
         for r in results:
             r["bin_index"] = None
+            r["value"] = None
 
     csv_path = os.path.join(out_dir, f"{layer_name}.csv")
-    df_out = pd.DataFrame([{
-        "GEOID": r["GEOID"],
-        "state_name": state_names.get(r["GEOID"], ""),
-        "county_name": county_names.get(r["GEOID"], r["GEOID"]),
-        "r": r["rgb"][0],
-        "g": r["rgb"][1],
-        "b": r["rgb"][2],
-        "bin_index": r["bin_index"]
-    } for r in results])
+    df_data = []
+    for r in results:
+        geoid = r["GEOID"]
+        # Get county name - prefer from lookup, fallback to shapefile NAME if available
+        county_name = county_names.get(geoid, geoid)
+        # Get state name - prefer from lookup, fallback to shapefile if available
+        state_name = state_names.get(geoid, "")
+        
+        # Final fallback: try to get from shapefile directly if still missing
+        if county_name == geoid or not state_name:
+            for region, shp_region in shp_regions.items():
+                if "GEOID" in shp_region.columns:
+                    matching = shp_region[shp_region["GEOID"].astype(str).str.zfill(5) == geoid]
+                    if len(matching) > 0:
+                        row_data = matching.iloc[0]
+                        if county_name == geoid and "NAME" in row_data:
+                            county_name = row_data["NAME"]
+                        if not state_name:
+                            if "STATE_NAME" in row_data:
+                                state_name = row_data["STATE_NAME"]
+                            elif "STUSPS" in row_data:
+                                state_name = row_data["STUSPS"]
+                        break
+        
+        row = {
+            "GEOID": geoid,
+            "state_name": state_name,
+            "county_name": county_name,
+            "r": r["rgb"][0],
+            "g": r["rgb"][1],
+            "b": r["rgb"][2],
+            "bin_index": r["bin_index"],
+            "value": r.get("value")  # Add value for both continuous and binned
+        }
+        df_data.append(row)
+    df_out = pd.DataFrame(df_data)
     df_out = df_out.rename(columns={"GEOID": "FIPS"})
     df_out.to_csv(csv_path, index=False)
 
@@ -963,21 +1326,30 @@ def process_uploaded_image(image_path, layer_name="uploaded", out_dir="data", le
 
     rgb_map = {r["GEOID"]: r["rgb"] for r in results}
     bin_map = {r["GEOID"]: r["bin_index"] for r in results}
+    value_map = {r["GEOID"]: r.get("value") for r in results}
 
     features = []
     for _, row in shp4326.iterrows():
         rgb = rgb_map.get(row["GEOID"], [None, None, None])
         bin_index = bin_map.get(row["GEOID"], None)
         county_name = county_names.get(row["GEOID"], row["GEOID"])
+        state_name = state_names.get(row["GEOID"], "")
+        # Get state abbreviation from shapefile if available
+        state_abbr = row.get("STUSPS", "") if "STUSPS" in row else ""
+        props = {
+                "GEOID": row["GEOID"],
+                "name": county_name,
+            "state_name": state_name,
+            "state_abbr": state_abbr,
+            "STUSPS": state_abbr,  # Also include as STUSPS for compatibility
+                "rgb": rgb,
+            "bin_index": bin_index,
+            "value": value_map.get(row["GEOID"])  # Include value for both continuous and binned
+            }
         features.append({
             "type": "Feature",
             "geometry": mapping(row.geometry),
-            "properties": {
-                "GEOID": row["GEOID"],
-                "name": county_name,
-                "rgb": rgb,
-                "bin_index": bin_index
-            }
+            "properties": props
         })
 
     geojson_path = os.path.join(out_dir, f"{layer_name}.geojson")
@@ -1042,10 +1414,12 @@ def load_or_generate_geojson(layer, out_dir="data"):
             pass
         county_data_path = os.path.join(BASE_DIR, "cb_2024_us_county_500k", "county_data.csv")
         county_names = {}
+        state_names = {}
         if os.path.exists(county_data_path):
             county_df = pd.read_csv(county_data_path, dtype=str)
             county_df['fips_padded'] = county_df['fips'].str.zfill(5)
             county_names = dict(zip(county_df['fips_padded'], county_df['name']))
+            state_names = dict(zip(county_df['fips_padded'], county_df['state']))
 
         df_in = pd.read_csv(csv_path, dtype=str)
         used_fips_header = ("GEOID" not in df_in.columns) and ("FIPS" in df_in.columns)
@@ -1069,15 +1443,24 @@ def load_or_generate_geojson(layer, out_dir="data"):
         features = []
         for _, row in merged.iterrows():
             county_name = county_names.get(row["GEOID"], row["GEOID"])
-            features.append({
-                "type": "Feature",
-                "geometry": mapping(row.geometry),
-                "properties": {
+            # Get state_name from CSV if available, otherwise from county_data lookup
+            state_name = row.get("state_name", "")
+            if not state_name:
+                state_name = state_names.get(row["GEOID"], "")
+            props = {
                     "GEOID": row["GEOID"],
                     "name": county_name,
+                "state_name": state_name,
                     "rgb": [row["r"], row["g"], row["b"]],
                     "bin_index": row.get("bin_index", None)
                 }
+            # Add value if available (for continuous legends)
+            if "value" in row and row["value"] is not None:
+                props["value"] = row["value"]
+            features.append({
+                "type": "Feature",
+                "geometry": mapping(row.geometry),
+                "properties": props
             })
 
         with open(geojson_path, "w", encoding="utf-8") as f:

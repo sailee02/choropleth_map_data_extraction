@@ -19,7 +19,8 @@ export const uploadImage = (
   legendSelection = null,
   uploadId = null,
   regionSelections = null,
-  projection = "4326"
+  projection = "4326",
+  legendTypeInfo = null
 ) => {
   const form = new FormData();
   form.append("file", file);
@@ -36,6 +37,9 @@ export const uploadImage = (
   if (regionSelections) {
     console.log("🔍 DEBUG: Sending regionSelections to backend:", JSON.stringify(regionSelections, null, 2));
     form.append("region_selections", JSON.stringify(regionSelections));
+  }
+  if (legendTypeInfo) {
+    form.append("legend_type_info", JSON.stringify(legendTypeInfo));
   }
   
   return axios.post(`${API_ROOT}/api/process`, form, {

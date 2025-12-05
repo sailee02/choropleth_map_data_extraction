@@ -557,3 +557,162 @@ def generate_conus_interactive_overlay(
     result_img.save(output_path)
     return output_path
 
+
+def generate_alaska_interactive_overlay(
+    image_path: str,
+    upload_id: str,
+    alaska_rect4: List[Tuple[int, int]],
+    projection: str = "4326",
+    output_path: Optional[str] = None,
+    homography_matrix: Optional[np.ndarray] = None,
+    tps_func: Optional[callable] = None,
+) -> str:
+    """
+    Generate Alaska-only overlay preview with user-controlled corner positions.
+    Uses homography to map shapefile bounds to the 4 corner points (allows rotation/scaling).
+    
+    Args:
+        image_path: Path to uploaded image
+        upload_id: Upload ID
+        alaska_rect4: Alaska rectangle corners [(x1,y1),(x2,y2),(x3,y3),(x4,y4)] in pixel coordinates
+                     Can be rotated/scaled - homography will handle the transformation
+        projection: Projection code ("4326" or "5070")
+        output_path: Optional output path
+    
+    Returns:
+        Path to generated overlay image
+    """
+    if output_path is None:
+        output_dir = os.path.join(BASE_DIR, "data")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"{upload_id}_alaska_interactive_overlay.png")
+    
+    # Load image at natural size
+    img_pil = Image.open(image_path).convert("RGB")
+    W, img_height = img_pil.size  # Use img_height to avoid conflict with homography H
+    overlay = np.array(img_pil)
+    
+    # Load Alaska outline shapefile
+    outline_path = _get_region_outline_path(region="alaska", projection=projection)
+    
+    if not os.path.exists(outline_path):
+        # Fallback to full shapefile
+        shapefile_path = _get_region_shapefile_path(region="alaska", projection=projection)
+        if not os.path.exists(shapefile_path):
+            fallback_alaska_path = os.path.join(BASE_DIR, "cb_2024_us_county_500k_alaska", f"cb_2024_us_county_500k_alaska.shp")
+            if os.path.exists(fallback_alaska_path):
+                shapefile_path = fallback_alaska_path
+            else:
+                try:
+                    from data_processing import SHAPEFILE_PATH
+                except ImportError:
+                    from backend.data_processing import SHAPEFILE_PATH
+                shapefile_path = SHAPEFILE_PATH
+        shp = gpd.read_file(shapefile_path)
+        shp["geometry"] = shp.geometry.boundary
+    else:
+        shp = gpd.read_file(outline_path)
+    
+    # Ensure GEOID column exists
+    if "GEOID" not in shp.columns:
+        shp["GEOID"] = shp.index.astype(str)
+    shp["GEOID"] = shp["GEOID"].astype(str).str.zfill(5)
+    
+    # Set CRS if missing
+    if shp.crs is None:
+        if projection == "4326":
+            shp = shp.set_crs(4326, allow_override=True)
+        elif projection == "5070":
+            shp = shp.set_crs(5070, allow_override=True)
+        else:
+            shp = shp.set_crs(4269, allow_override=True)
+    
+    # Reproject to EPSG:5070 for consistent transformation
+    target_crs = 5070
+    if shp.crs.to_epsg() != target_crs:
+        shp = shp.to_crs(target_crs)
+    
+    # Get shapefile bounds (source corners in geographic/projected coordinates)
+    xmin, ymin, xmax, ymax = shp.total_bounds
+    src_bounds = (xmin, ymin, xmax, ymax)
+    
+    # Use TPS if provided, otherwise use homography
+    try:
+        from utils.homography import homography_from_4pts, apply_homography_to_geometry, rect_bounds_to_corners
+        from utils.tps import apply_tps_to_geometry
+    except ImportError:
+        from backend.utils.homography import homography_from_4pts, apply_homography_to_geometry, rect_bounds_to_corners
+        from backend.utils.tps import apply_tps_to_geometry
+    
+    if tps_func is not None:
+        # Use TPS transformation
+        print(f"\n🔧 ALASKA INTERACTIVE OVERLAY TRANSFORMATION (using TPS):")
+        print(f"  Using pre-computed TPS function from county alignment")
+        gdf_px = shp.copy()
+        gdf_px["geometry"] = gdf_px.geometry.apply(
+            lambda geom: apply_tps_to_geometry(geom, tps_func)
+        )
+        gdf_px.crs = None
+    elif homography_matrix is not None:
+        # Check if it's actually a numpy array (homography) or a callable (TPS function mistakenly passed)
+        if isinstance(homography_matrix, np.ndarray):
+            # Use the homography computed from county points (more accurate)
+            H = homography_matrix
+            print(f"\n🔧 ALASKA INTERACTIVE OVERLAY TRANSFORMATION:")
+            print(f"  Using provided homography matrix (from county point alignment)")
+            gdf_px = shp.copy()
+            gdf_px["geometry"] = gdf_px.geometry.apply(
+                lambda geom: apply_homography_to_geometry(geom, H)
+            )
+            gdf_px.crs = None
+        else:
+            # It's a callable (TPS function), use it
+            print(f"\n🔧 ALASKA INTERACTIVE OVERLAY TRANSFORMATION (using TPS from homography_matrix param):")
+            print(f"  Using TPS function (passed as homography_matrix)")
+            gdf_px = shp.copy()
+            gdf_px["geometry"] = gdf_px.geometry.apply(
+                lambda geom: apply_tps_to_geometry(geom, homography_matrix)
+            )
+            gdf_px.crs = None
+    else:
+        # Fallback: compute from bounds (less accurate)
+        src4 = rect_bounds_to_corners(src_bounds, is_geographic=True)
+        dst4 = np.array(alaska_rect4, dtype=float)
+        H = homography_from_4pts(src4, dst4)
+        print(f"\n🔧 ALASKA INTERACTIVE OVERLAY TRANSFORMATION:")
+        print(f"  Source corners (shapefile bounds): {src4}")
+        print(f"  Destination corners (user-dragged rect4): {dst4}")
+        print(f"  Computed homography from bounds (fallback)")
+        gdf_px = shp.copy()
+        gdf_px["geometry"] = gdf_px.geometry.apply(
+            lambda geom: apply_homography_to_geometry(geom, H)
+        )
+        gdf_px.crs = None
+    
+    # Rasterize
+    geometries_for_raster = []
+    for geom in gdf_px.geometry:
+        if geom is None or geom.is_empty:
+            continue
+        if geom.geom_type in ("LineString", "MultiLineString"):
+            geom_buffered = geom.buffer(1.0)
+            if not geom_buffered.is_empty:
+                geometries_for_raster.append(geom_buffered)
+        else:
+            geometries_for_raster.append(geom)
+    
+    if geometries_for_raster:
+        mask = rasterize(
+            [(geom, 1) for geom in geometries_for_raster],
+            out_shape=(img_height, W),  # Use img_height instead of H
+            transform=Affine.identity(),
+            fill=0,
+            dtype="uint8"
+        )
+        overlay[mask > 0] = [255, 0, 0]  # Red border
+    
+    # Save overlay
+    result_img = Image.fromarray(overlay)
+    result_img.save(output_path)
+    return output_path
+

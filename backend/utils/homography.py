@@ -42,6 +42,94 @@ def rect_bounds_to_corners(bounds: Tuple[float, float, float, float], is_geograp
         ], dtype=float)
 
 
+def affine_from_3pts(src3: np.ndarray, dst3: np.ndarray) -> np.ndarray:
+    """
+    Compute 2x3 affine transformation matrix from 3 point correspondences.
+    
+    Args:
+        src3: Source points (3x2) in geographic/projected coordinates
+        dst3: Destination points (3x2) in pixel coordinates
+    
+    Returns:
+        2x3 affine transformation matrix A such that dst = A @ [src, 1]
+    """
+    # Build system: [x y 1 0 0 0] [a]   [X]
+    #               [0 0 0 x y 1] [b] = [Y]
+    #                              [c]
+    #                              [d]
+    #                              [e]
+    #                              [f]
+    A_rows = []
+    b_vec = []
+    for (x, y), (X, Y) in zip(src3, dst3):
+        A_rows.append([x, y, 1, 0, 0, 0])
+        A_rows.append([0, 0, 0, x, y, 1])
+        b_vec.extend([X, Y])
+    
+    A = np.array(A_rows)
+    b = np.array(b_vec)
+    
+    # Solve Ax = b using least squares
+    params = np.linalg.lstsq(A, b, rcond=None)[0]
+    
+    # Reshape to 2x3 matrix
+    affine_matrix = params.reshape(2, 3)
+    return affine_matrix
+
+
+def apply_affine_to_xy(x: float, y: float, A: np.ndarray) -> tuple:
+    """Apply 2x3 affine transformation to a point."""
+    src_vec = np.array([x, y, 1.0])
+    dst_vec = A @ src_vec
+    return (dst_vec[0], dst_vec[1])
+
+
+def apply_affine_to_geometry(geom, A: np.ndarray):
+    """Apply 2x3 affine transformation to a Shapely geometry."""
+    from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon
+    
+    if geom is None or geom.is_empty:
+        return geom
+    
+    def transform_point(pt):
+        x, y = pt.coords[0]
+        x_new, y_new = apply_affine_to_xy(x, y, A)
+        return Point(x_new, y_new)
+    
+    def transform_linestring(ls):
+        coords = [apply_affine_to_xy(x, y, A) for x, y in ls.coords]
+        return LineString(coords)
+    
+    def transform_polygon(poly):
+        exterior = transform_linestring(poly.exterior)
+        interiors = [transform_linestring(interior) for interior in poly.interiors]
+        return Polygon(exterior, interiors)
+    
+    geom_type = geom.geom_type
+    
+    if geom_type == "Point":
+        return transform_point(geom)
+    elif geom_type == "LineString":
+        return transform_linestring(geom)
+    elif geom_type == "Polygon":
+        return transform_polygon(geom)
+    elif geom_type == "MultiPoint":
+        return MultiPoint([transform_point(pt) for pt in geom.geoms])
+    elif geom_type == "MultiLineString":
+        return MultiLineString([transform_linestring(ls) for ls in geom.geoms])
+    elif geom_type == "MultiPolygon":
+        return MultiPolygon([transform_polygon(poly) for poly in geom.geoms])
+    else:
+        # Fallback
+        coords = [apply_affine_to_xy(x, y, A) for x, y in geom.coords]
+        if len(coords) == 1:
+            return Point(coords[0])
+        elif len(coords) == 2:
+            return LineString(coords)
+        else:
+            return Polygon(coords)
+
+
 def homography_from_4pts(src4: np.ndarray, dst4: np.ndarray) -> np.ndarray:
     """
     Compute 3x3 homography matrix H that maps src4 → dst4.

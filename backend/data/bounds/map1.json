@@ -1,1 +1,1 @@
-{"type": "map_canvas_bounds", "image_size": {"width": 615, "height": 467}, "canvases": [{"name": "CONUS", "bbox": [29, 17, 588, 445], "polygon": null, "confidence": 0.82}]}
+{"type": "map_canvas_bounds", "image_size": {"width": 615, "height": 467}, "canvases": [{"name": "CONUS", "bbox": [29, 17, 588, 445], "polygon": null, "confidence": 0.82, "rect4": null}]}

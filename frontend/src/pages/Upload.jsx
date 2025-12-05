@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from "react";
 import MapView from "../components/MapView";
 import ImageSelector from "../components/ImageSelector";
 import RegionSelector from "../components/RegionSelector";
-import { uploadImage, fetchGeoJSON, downloadFile, detectBounds, setBoundsManually, regenerateOverlay, generateOverlayPreview } from "../api";
+import LegendTypeSelector from "../components/LegendTypeSelector";
+import { uploadImage, fetchGeoJSON, downloadFile, detectBounds, setBoundsManually, regenerateOverlay } from "../api";
 
 export default function Upload({ onNavigateToHome }) {
   const [geojson, setGeojson] = useState(null);
@@ -12,15 +13,15 @@ export default function Upload({ onNavigateToHome }) {
   const [projection, setProjection] = useState("4326"); // Default to EPSG:4326
   const [uploadedImageUrl, setUploadedImageUrl] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [showLegendTypeSelector, setShowLegendTypeSelector] = useState(false);
   const [showImageSelector, setShowImageSelector] = useState(false);
   const [showRegionSelector, setShowRegionSelector] = useState(false);
   const [legendSelection, setLegendSelection] = useState(null);
+  const [legendTypeInfo, setLegendTypeInfo] = useState(null); // { type: 'binned'|'continuous', numBins?: number, minValue?: number, maxValue?: number }
   const [regionSelections, setRegionSelections] = useState(null); // { conus: {...}, alaska: {...}, hawaii: {...} }
   const [uploadedFile, setUploadedFile] = useState(null);
   const [uploadId, setUploadId] = useState(null);
   const [overlayUrl, setOverlayUrl] = useState(null);
-  const [previewOverlayUrl, setPreviewOverlayUrl] = useState(null);
-  const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
   const [autoBounds, setAutoBounds] = useState(null);
   const [isDetecting, setIsDetecting] = useState(false);
   const [showManualBounds, setShowManualBounds] = useState(false);
@@ -90,6 +91,16 @@ export default function Upload({ onNavigateToHome }) {
     }
   };
 
+  const handleLegendTypeConfirm = (typeInfo) => {
+    setLegendTypeInfo(typeInfo);
+    setShowLegendTypeSelector(false);
+    setShowImageSelector(true);
+  };
+
+  const handleLegendTypeCancel = () => {
+    setShowLegendTypeSelector(false);
+  };
+
   const handleLegendSelection = (selection) => {
     setLegendSelection(selection);
     setShowImageSelector(false);
@@ -103,49 +114,19 @@ export default function Upload({ onNavigateToHome }) {
     setShowRegionSelector(false);
     const hasOptionalRegions = regions.alaska || regions.hawaii;
     setMessage(hasOptionalRegions 
-      ? "CONUS and optional regions marked. Click 'Preview Overlay' to check alignment, then 'Process Image' to continue."
-      : "CONUS marked. Click 'Preview Overlay' to check alignment, then 'Process Image' to continue.");
-  };
-  
-  const handleGeneratePreview = async () => {
-    if (!uploadId || !legendSelection) {
-      setMessage("Please select legend area first.");
-      return;
-    }
-    
-    setIsGeneratingPreview(true);
-    setMessage("Generating overlay preview...");
-    
-    try {
-      const resp = await generateOverlayPreview(uploadId, projection, regionSelections);
-      console.log("Overlay preview response:", resp.data);
-      if (resp.data?.overlayUrl) {
-        const API_ROOT = import.meta.env.VITE_API_ROOT || "http://localhost:5001";
-        const fullUrl = `${API_ROOT}${resp.data.overlayUrl}`;
-        console.log("Setting overlay URL:", fullUrl);
-        setPreviewOverlayUrl(fullUrl);
-        setMessage("Overlay preview generated! Check the preview below.");
-      } else {
-        setMessage("Preview generation failed: " + (resp.data?.error || "Unknown error"));
-        console.error("No overlayUrl in response:", resp.data);
-      }
-    } catch (err) {
-      console.error("Preview generation error:", err);
-      setMessage("Preview generation error: " + (err.response?.data?.error || err.message));
-    } finally {
-      setIsGeneratingPreview(false);
-    }
+      ? "CONUS and optional regions marked. Click 'Process Image' to continue."
+      : "CONUS marked. Click 'Process Image' to continue.");
   };
 
   const handleSkipRegions = () => {
     setRegionSelections({ alaska: null, hawaii: null });
     setShowRegionSelector(false);
-    setMessage("Legend area selected. Click 'Preview Overlay' to check alignment, then 'Process Image' to continue.");
+    setMessage("Legend area selected. Click 'Process Image' to continue.");
   };
 
   const handleProcessImage = async () => {
-    if (!uploadedFile || !legendSelection) {
-      setMessage("Please select a file and legend area first.");
+    if (!uploadedFile || !legendSelection || !legendTypeInfo) {
+      setMessage("Please select a file, legend type, and legend area first.");
       return;
     }
     if (!uploadId) {
@@ -168,7 +149,8 @@ export default function Upload({ onNavigateToHome }) {
         legendSelection,
         uploadId,
         regionSelections,
-        projection
+        projection,
+        legendTypeInfo
       );
       if (resp.data?.error) {
         setMessage("Processing error: " + resp.data.error);
@@ -417,7 +399,7 @@ export default function Upload({ onNavigateToHome }) {
                     setMessage("Wait for bounds detection before selecting the legend area.");
                     return;
                   }
-                  setShowImageSelector(true);
+                  setShowLegendTypeSelector(true);
                 }}
                 disabled={isDetecting || !uploadId}
                 style={{
@@ -434,26 +416,6 @@ export default function Upload({ onNavigateToHome }) {
                 }}
               >
                 Select Legend Area
-              </button>
-            )}
-            
-            {uploadedFile && legendSelection && (
-              <button
-                onClick={handleGeneratePreview}
-                disabled={isGeneratingPreview || !uploadId}
-                style={{
-                  backgroundColor: isGeneratingPreview || !uploadId ? "#94a3b8" : "#28a745",
-                  color: "white",
-                  border: "none",
-                  padding: "12px 24px",
-                  borderRadius: "6px",
-                  fontSize: "16px",
-                  fontWeight: "500",
-                  cursor: isGeneratingPreview || !uploadId ? "not-allowed" : "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                {isGeneratingPreview ? "Generating..." : "Preview Overlay"}
               </button>
             )}
             
@@ -543,112 +505,6 @@ export default function Upload({ onNavigateToHome }) {
             </div>
           )}
 
-          {/* Bounds info (compact, hidden after processing) */}
-          {autoBounds && autoBounds.canvases && autoBounds.canvases.length > 0 && !geojson && (
-            <div
-              style={{
-                marginTop: "16px",
-                padding: "12px",
-                backgroundColor: "#f8fafc",
-                borderRadius: "6px",
-                fontSize: "12px",
-                textAlign: "left",
-                border: "1px solid #e2e8f0",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                <strong style={{ color: "#475569" }}>Map Bounds Detected</strong>
-                <button
-                  onClick={() => setShowManualBounds(!showManualBounds)}
-                  style={{
-                    backgroundColor: "#3b82f6",
-                    color: "white",
-                    border: "none",
-                    padding: "4px 8px",
-                    borderRadius: "4px",
-                    fontSize: "11px",
-                    cursor: "pointer",
-                  }}
-                >
-                  {showManualBounds ? "Hide" : "Override"}
-                </button>
-              </div>
-              <div style={{ color: "#64748b", fontSize: "11px" }}>
-                Upload ID: {uploadId || "(not set)"} • BBox: [{autoBounds.canvases[0].bbox.join(", ")}]
-              </div>
-            </div>
-          )}
-
-          {uploadId && showManualBounds && (
-            <div
-              style={{
-                marginTop: "16px",
-                padding: "16px",
-                backgroundColor: "#fef3c7",
-                borderRadius: "6px",
-                fontSize: "14px",
-                textAlign: "left",
-                border: "1px solid #fbbf24",
-              }}
-            >
-              <strong style={{ display: "block", marginBottom: "8px", color: "#92400e" }}>
-                Manual Bounds (from ChatGPT)
-              </strong>
-              <p style={{ fontSize: "12px", color: "#78350f", margin: "0 0 8px 0" }}>
-                Paste the bounds JSON you got from ChatGPT here:
-              </p>
-              <textarea
-                value={manualBoundsJson}
-                onChange={(e) => setManualBoundsJson(e.target.value)}
-                placeholder='{"type":"map_canvas_bounds","image_size":{"width":864,"height":527},"canvases":[{"name":"CONUS","bbox":[41,23,825,504],"polygon":null,"confidence":0.82}]}'
-                style={{
-                  width: "100%",
-                  minHeight: "120px",
-                  padding: "8px",
-                  border: "1px solid #d1d5db",
-                  borderRadius: "4px",
-                  fontSize: "12px",
-                  fontFamily: "monospace",
-                  marginBottom: "8px",
-                  boxSizing: "border-box",
-                }}
-              />
-              <div style={{ display: "flex", gap: "8px" }}>
-                <button
-                  onClick={handleManualBoundsSubmit}
-                  style={{
-                    backgroundColor: "#10b981",
-                    color: "white",
-                    border: "none",
-                    padding: "8px 16px",
-                    borderRadius: "4px",
-                    fontSize: "14px",
-                    cursor: "pointer",
-                    fontWeight: "500",
-                  }}
-                >
-                  Save Manual Bounds
-                </button>
-                <button
-                  onClick={() => {
-                    setShowManualBounds(false);
-                    setManualBoundsJson("");
-                  }}
-                  style={{
-                    backgroundColor: "#6b7280",
-                    color: "white",
-                    border: "none",
-                    padding: "8px 16px",
-                    borderRadius: "4px",
-                    fontSize: "14px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* Download Button */}
           {geojson && (
@@ -680,66 +536,6 @@ export default function Upload({ onNavigateToHome }) {
         </div>
       </section>
 
-      {/* Overlay Preview Section */}
-      {previewOverlayUrl && (
-        <section
-          style={{
-            padding: "40px 0",
-            maxWidth: "1200px",
-            margin: "0 auto",
-            paddingLeft: "24px",
-            paddingRight: "24px",
-          }}
-        >
-          <h3
-            style={{
-              fontSize: "28px",
-              fontWeight: "700",
-              margin: "0 0 24px 0",
-              textAlign: "center",
-              color: "#333",
-            }}
-          >
-            Shapefile Overlay Preview
-          </h3>
-          <p
-            style={{
-              fontSize: "14px",
-              color: "#666",
-              textAlign: "center",
-              marginBottom: "24px",
-            }}
-          >
-            Red lines = CONUS, Green = Alaska, Blue = Hawaii
-          </p>
-          <div
-            style={{
-              backgroundColor: "white",
-              borderRadius: "8px",
-              border: "1px solid #e5e5e5",
-              padding: "20px",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-              textAlign: "center",
-            }}
-          >
-            <img
-              src={previewOverlayUrl}
-              alt="Shapefile Overlay Preview"
-              style={{
-                width: "auto",
-                height: "auto",
-                maxWidth: "100%",
-                borderRadius: "4px",
-                imageRendering: "pixelated", // Prevent CSS scaling interpolation
-              }}
-              onError={(e) => {
-                console.error("Failed to load overlay image:", previewOverlayUrl);
-                e.target.alt = "Failed to load overlay. Check console for errors.";
-              }}
-            />
-          </div>
-        </section>
-      )}
 
       {/* Image Display Section */}
       {(uploadedImageUrl || geojson) && (
@@ -894,6 +690,15 @@ export default function Upload({ onNavigateToHome }) {
         </section>
       )}
       
+      {/* Legend Type Selector Modal */}
+      {showLegendTypeSelector && uploadedImageUrl && (
+        <LegendTypeSelector
+          imageUrl={uploadedImageUrl}
+          onConfirm={handleLegendTypeConfirm}
+          onCancel={handleLegendTypeCancel}
+        />
+      )}
+
       {/* Image Selector Modal */}
       {showImageSelector && uploadedImageUrl && (
         <ImageSelector

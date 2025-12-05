@@ -81,6 +81,15 @@ def process_image_endpoint():
     if projection not in ("4326", "5070"):
         projection = "4326"  # Default to 4326
 
+    # 🆕 Read legend type info if provided
+    legend_type_info = None
+    legend_type_info_str = request.form.get("legend_type_info", "").strip()
+    if legend_type_info_str:
+        try:
+            legend_type_info = json.loads(legend_type_info_str)
+        except Exception as e:
+            return jsonify({"error": f"Failed to parse legend type info: {str(e)}"}), 400
+
     upload_id_raw = request.form.get("upload_id") or os.path.splitext(f.filename)[0]
     upload_id = _sanitize_upload_id(upload_id_raw)
     ext = os.path.splitext(f.filename)[1].lower() or ".png"
@@ -88,7 +97,7 @@ def process_image_endpoint():
     f.save(saved_img)
 
     try:
-        # 🆕 Pass legend_selection, region_selections, and projection to processing function
+        # 🆕 Pass legend_selection, region_selections, projection, and legend_type_info to processing function
         csv_path, geojson_path = process_uploaded_image(
             image_path=saved_img,
             layer_name=layer,
@@ -97,7 +106,8 @@ def process_image_endpoint():
             n_bins=n_clusters,
             upload_id=upload_id,
             region_selections=region_selections,
-            projection=projection
+            projection=projection,
+            legend_type_info=legend_type_info
         )
 
         return jsonify({
@@ -657,6 +667,301 @@ def preview_overlay_interactive_endpoint():
         print(error_trace)
         print(f"Error message: {str(e)}\n")
         return jsonify({"error": f"Failed to generate interactive overlay: {str(e)}"}), 500
+
+
+@app.route("/api/compute-alignment-from-counties", methods=["POST"])
+def compute_alignment_from_counties_endpoint():
+    """Compute alignment from 4 county selections using homography."""
+    try:
+        upload_id = request.form.get("upload_id")
+        if not upload_id:
+            return jsonify({"error": "upload_id required"}), 400
+        
+        safe_id = _sanitize_upload_id(upload_id)
+        
+        # Get selected points
+        selected_points_str = request.form.get("selected_points", "").strip()
+        if not selected_points_str:
+            return jsonify({"error": "selected_points required"}), 400
+        
+        try:
+            selected_points = json.loads(selected_points_str)
+            # Both CONUS and Alaska use 4 points
+            if not isinstance(selected_points, list) or len(selected_points) != 4:
+                return jsonify({"error": "selected_points must be a list of 4 points"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to parse selected_points: {str(e)}"}), 400
+        
+        # Get projection
+        projection = request.form.get("projection", "4326").strip()
+        if projection not in ("4326", "5070"):
+            projection = "4326"
+        
+        # Find the image file
+        for ext in [".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"]:
+            img_path = os.path.join(DATA_DIR, f"{safe_id}{ext}")
+            if os.path.exists(img_path):
+                break
+        else:
+            return jsonify({"error": "Image file not found"}), 404
+        
+        # Get region
+        region = request.form.get("region", "conus").strip()
+        if region not in ("conus", "alaska"):
+            region = "conus"
+        
+        # Load shapefile
+        try:
+            from data_processing import _get_region_shapefile_path
+        except Exception:
+            from backend.data_processing import _get_region_shapefile_path
+        
+        shapefile_path = _get_region_shapefile_path(region=region, projection=projection)
+        if not os.path.exists(shapefile_path):
+            # Fallback
+            try:
+                from data_processing import SHAPEFILE_PATH
+            except Exception:
+                from backend.data_processing import SHAPEFILE_PATH
+            shapefile_path = SHAPEFILE_PATH
+        
+        import geopandas as gpd
+        import numpy as np
+        from shapely.geometry import Point
+        
+        shp = gpd.read_file(shapefile_path)
+        
+        # Handle different possible GEOID column names (for compatibility)
+        if "GEOID" in shp.columns:
+            shp["GEOID"] = shp["GEOID"].astype(str).str.zfill(5)
+        elif "GEO_ID" in shp.columns:
+            shp["GEOID"] = shp["GEO_ID"].astype(str).str.zfill(5)
+        elif "COUNTYFP" in shp.columns and "STATEFP" in shp.columns:
+            # Construct GEOID from STATEFP + COUNTYFP
+            shp["GEOID"] = shp["STATEFP"].astype(str).str.zfill(2) + shp["COUNTYFP"].astype(str).str.zfill(3)
+        else:
+            # Create GEOID from index if no standard columns exist
+            shp["GEOID"] = shp.index.astype(str).str.zfill(5)
+        
+        # Debug: Print available GEOIDs for troubleshooting
+        print(f"  Loaded shapefile with {len(shp)} counties")
+        print(f"  GEOID column sample: {shp['GEOID'].head(10).tolist()}")
+        
+        # Reproject to EPSG:5070 for calculations
+        target_crs = 5070
+        if shp.crs is None:
+            if projection == "4326":
+                shp = shp.set_crs(4326, allow_override=True)
+            elif projection == "5070":
+                shp = shp.set_crs(5070, allow_override=True)
+        
+        if shp.crs.to_epsg() != target_crs:
+            shp = shp.to_crs(target_crs)
+        
+        # Get centroids of selected counties (source points in geographic/projected coords)
+        src_points = []
+        dst_points = []
+        county_names = []
+        
+        for point in selected_points:
+            geoid = str(point.get("geoid", "")).zfill(5)
+            county = shp[shp["GEOID"] == geoid]
+            
+            if len(county) == 0:
+                # Try to find similar GEOIDs for debugging
+                similar_geoids = shp[shp["GEOID"].str.startswith(geoid[:2])]["GEOID"].head(5).tolist()
+                error_msg = f"County with GEOID {geoid} not found in shapefile"
+                if similar_geoids:
+                    error_msg += f". Similar GEOIDs in same state: {similar_geoids}"
+                return jsonify({"error": error_msg}), 400
+            
+            # Get centroid
+            centroid = county.iloc[0].geometry.centroid
+            src_points.append([centroid.x, centroid.y])
+            
+            # Destination point in pixel coordinates
+            dst_points.append([float(point["x"]), float(point["y"])])
+            
+            # Store county name for debugging
+            county_name = county.iloc[0].get("NAME", geoid)
+            county_names.append(county_name)
+        
+        num_points = len(selected_points)
+        
+        # Validate we have points
+        if num_points == 0:
+            return jsonify({"error": "No points provided"}), 400
+        if len(src_points) != num_points or len(dst_points) != num_points:
+            return jsonify({"error": f"Mismatch: {num_points} selected points but {len(src_points)} src points and {len(dst_points)} dst points"}), 400
+        
+        # Convert to numpy arrays and validate shapes
+        src_points_array = np.array(src_points, dtype=float)
+        dst_points_array = np.array(dst_points, dtype=float)
+        
+        # Ensure 2D arrays (Nx2)
+        if src_points_array.ndim == 1:
+            src_points_array = src_points_array.reshape(-1, 2)
+        if dst_points_array.ndim == 1:
+            dst_points_array = dst_points_array.reshape(-1, 2)
+        
+        # Validate final shapes
+        if src_points_array.shape != (num_points, 2):
+            return jsonify({"error": f"src_points_array has wrong shape: {src_points_array.shape}, expected ({num_points}, 2)"}), 400
+        if dst_points_array.shape != (num_points, 2):
+            return jsonify({"error": f"dst_points_array has wrong shape: {dst_points_array.shape}, expected ({num_points}, 2)"}), 400
+        
+        # Debug: Print point correspondences and array info
+        print(f"\n  Alignment point correspondences ({num_points} points):")
+        print(f"  Array shapes: src_points_array={src_points_array.shape}, dst_points_array={dst_points_array.shape}")
+        for i, (src, dst, name) in enumerate(zip(src_points_array, dst_points_array, county_names)):
+            print(f"    Point {i+1} ({name}):")
+            print(f"      Shapefile (EPSG:5070): ({src[0]:.2f}, {src[1]:.2f})")
+            print(f"      Image (pixels): ({dst[0]:.2f}, {dst[1]:.2f})")
+        
+        # Additional validation: check for any invalid values
+        if np.any(np.isnan(src_points_array)) or np.any(np.isinf(src_points_array)):
+            return jsonify({"error": "src_points_array contains NaN or Inf values"}), 400
+        if np.any(np.isnan(dst_points_array)) or np.any(np.isinf(dst_points_array)):
+            return jsonify({"error": "dst_points_array contains NaN or Inf values"}), 400
+        
+        # Compute transformation - use TPS (Thin-Plate Spline) for better non-linear warping
+        if num_points == 4:
+            # Use TPS for 4 points (better for non-linear distortions)
+            try:
+                from utils.tps import tps_transform_from_points, apply_tps_to_geometry, verify_tps_accuracy
+            except Exception:
+                from backend.utils.tps import tps_transform_from_points, apply_tps_to_geometry, verify_tps_accuracy
+            
+            print(f"\n  Using Thin-Plate Spline (TPS) transformation for non-linear warping")
+            print(f"  Shapefile is already in EPSG:5070 (flat projection) - good for TPS")
+            
+            # Create TPS transformation function
+            tps_func = tps_transform_from_points(src_points_array, dst_points_array)
+            transform_type = "tps"
+            
+            # Debug: Verify TPS by transforming source points back
+            print(f"\n  TPS verification (transforming source points back):")
+            max_error = verify_tps_accuracy(tps_func, src_points_array, dst_points_array)
+            
+            for i, (src, dst, name) in enumerate(zip(src_points_array, dst_points_array, county_names)):
+                x_transformed, y_transformed = tps_func(src[0], src[1])
+                error_x = abs(x_transformed - dst[0])
+                error_y = abs(y_transformed - dst[1])
+                error_total = np.sqrt(error_x**2 + error_y**2)
+                print(f"    Point {i+1} ({name}):")
+                print(f"      Expected: ({dst[0]:.2f}, {dst[1]:.2f})")
+                print(f"      Got: ({x_transformed:.2f}, {y_transformed:.2f})")
+                print(f"      Error: ({error_x:.2f}, {error_y:.2f}), Total: {error_total:.2f}px")
+            
+            if max_error > 50:
+                print(f"  ⚠️  WARNING: Large TPS errors detected (max: {max_error:.2f}px)")
+                print(f"     This may indicate misalignment. Check that:")
+                print(f"     1. County points were clicked in the correct locations")
+                print(f"     2. The clicked points match the county centroids")
+                print(f"     3. The image coordinates are correct")
+            else:
+                print(f"  ✓ TPS accuracy is good (max error: {max_error:.2f}px)")
+            
+            # Get shapefile bounds and compute rect4 using TPS
+            xmin, ymin, xmax, ymax = shp.total_bounds
+            bounds_corners = np.array([
+                [xmin, ymax],  # TL
+                [xmax, ymax],  # TR
+                [xmax, ymin],  # BR
+                [xmin, ymin],  # BL
+            ], dtype=float)
+            
+            print(f"\n  Shapefile bounds (EPSG:5070): xmin={xmin:.2f}, ymin={ymin:.2f}, xmax={xmax:.2f}, ymax={ymax:.2f}")
+            
+            # Transform bounds corners to pixel coordinates using TPS
+            rect4 = []
+            for i, corner in enumerate(bounds_corners):
+                x, y = corner
+                px, py = tps_func(x, y)
+                rect4.append([int(round(px)), int(round(py))])
+                corner_names = ["TL", "TR", "BR", "BL"]
+                print(f"    Bounds corner {corner_names[i]}: ({x:.2f}, {y:.2f}) -> ({px:.2f}, {py:.2f})")
+            
+            print(f"  Computed rect4: {rect4}")
+            
+            # Store TPS function for later use in overlay generation
+            H = tps_func  # Store as H for compatibility with existing code
+        else:
+            return jsonify({"error": f"Expected 4 points, got {num_points}"}), 400
+        
+        # Generate preview overlay
+        if region == "conus":
+            try:
+                from utils.overlay_preview import generate_conus_interactive_overlay
+            except Exception:
+                from backend.utils.overlay_preview import generate_conus_interactive_overlay
+            
+            overlay_filename = f"{safe_id}_conus_aligned_preview.png"
+            overlay_path = os.path.join(DATA_DIR, overlay_filename)
+            
+            generate_conus_interactive_overlay(
+                image_path=img_path,
+                upload_id=safe_id,
+                conus_rect4=[tuple(p) for p in rect4],
+                projection=projection,
+                output_path=overlay_path,
+            )
+        else:
+            # For Alaska, use interactive overlay generation (similar to CONUS)
+            try:
+                from utils.overlay_preview import generate_alaska_interactive_overlay
+            except Exception:
+                from backend.utils.overlay_preview import generate_alaska_interactive_overlay
+            
+            overlay_filename = f"{safe_id}_alaska_aligned_preview.png"
+            overlay_path = os.path.join(DATA_DIR, overlay_filename)
+            
+            # Pass TPS function if using TPS, otherwise pass homography matrix
+            if transform_type == "tps":
+                generate_alaska_interactive_overlay(
+                    image_path=img_path,
+                    upload_id=safe_id,
+                    alaska_rect4=[tuple(p) for p in rect4],
+                    projection=projection,
+                    output_path=overlay_path,
+                    tps_func=tps_func,  # Pass TPS function for TPS transformation
+                )
+            else:
+                generate_alaska_interactive_overlay(
+                    image_path=img_path,
+                    upload_id=safe_id,
+                    alaska_rect4=[tuple(p) for p in rect4],
+                    projection=projection,
+                    output_path=overlay_path,
+                    homography_matrix=H,  # Pass homography matrix for homography transformation
+                )
+        
+        result = {
+            "status": "ok",
+            "rect4": rect4,
+            "overlayUrl": f"/data/{overlay_filename}",
+            "transform_type": transform_type,
+            "src_points": src_points_array.tolist(),
+            "dst_points": dst_points_array.tolist()
+        }
+        
+        # Include transformation info (TPS function can't be serialized, but we have src/dst points)
+        if transform_type == "tps":
+            # Store source and destination points so TPS can be recomputed in data_processing
+            result["tps_src_points"] = src_points_array.tolist()
+            result["tps_dst_points"] = dst_points_array.tolist()
+        elif H is not None:
+            result["homography"] = H.tolist()
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"\n❌ ERROR in compute-alignment-from-counties:")
+        print(error_trace)
+        print(f"Error message: {str(e)}\n")
+        return jsonify({"error": f"Failed to compute alignment: {str(e)}"}), 500
 
 
 if __name__ == "__main__":

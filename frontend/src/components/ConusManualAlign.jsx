@@ -6,6 +6,7 @@ export default function ConusManualAlign({
   imageUrl, 
   uploadId, 
   projection = "4326",
+  initialConusSelection = null, // {x, y, width, height, rect4} in natural image coordinates
   onConfirm, 
   onCancel 
 }) {
@@ -94,34 +95,50 @@ export default function ConusManualAlign({
     });
   };
 
-  // Initialize rectangle based on shapefile bounds
+  // Initialize rectangle based on user's selection or shapefile bounds
   useEffect(() => {
     if (imageLoaded && imageRef.current && shapefileData && !rect) {
       const imgRect = imageRef.current.getBoundingClientRect();
+      const naturalWidth = imageRef.current.naturalWidth;
+      const naturalHeight = imageRef.current.naturalHeight;
       
-      const { bounds } = shapefileData;
-      const boundsWidth = bounds.xmax - bounds.xmin;
-      const boundsHeight = bounds.ymax - bounds.ymin;
-      
-      // Calculate initial scale to fit shapefile reasonably
-      const baseScale = Math.min(imgRect.width / boundsWidth, imgRect.height / boundsHeight) * 0.4;
-      
-      // Center of image
-      const centerX = imgRect.width / 2;
-      const centerY = imgRect.height / 2;
-      
-      const rectWidth = boundsWidth * baseScale;
-      const rectHeight = boundsHeight * baseScale;
-      
-      // Initialize as axis-aligned rectangle
-      setRect({
-        x: centerX - rectWidth / 2,
-        y: centerY - rectHeight / 2,
-        width: rectWidth,
-        height: rectHeight,
-      });
+      if (initialConusSelection && initialConusSelection.x !== undefined) {
+        // Use user's drawn rectangle
+        const scaleX = imgRect.width / naturalWidth;
+        const scaleY = imgRect.height / naturalHeight;
+        
+        setRect({
+          x: initialConusSelection.x * scaleX,
+          y: initialConusSelection.y * scaleY,
+          width: initialConusSelection.width * scaleX,
+          height: initialConusSelection.height * scaleY,
+        });
+      } else {
+        // Fallback: Initialize based on shapefile bounds
+        const { bounds } = shapefileData;
+        const boundsWidth = bounds.xmax - bounds.xmin;
+        const boundsHeight = bounds.ymax - bounds.ymin;
+        
+        // Calculate initial scale to fit shapefile reasonably
+        const baseScale = Math.min(imgRect.width / boundsWidth, imgRect.height / boundsHeight) * 0.4;
+        
+        // Center of image
+        const centerX = imgRect.width / 2;
+        const centerY = imgRect.height / 2;
+        
+        const rectWidth = boundsWidth * baseScale;
+        const rectHeight = boundsHeight * baseScale;
+        
+        // Initialize as axis-aligned rectangle
+        setRect({
+          x: centerX - rectWidth / 2,
+          y: centerY - rectHeight / 2,
+          width: rectWidth,
+          height: rectHeight,
+        });
+      }
     }
-  }, [imageLoaded, shapefileData, rect]);
+  }, [imageLoaded, shapefileData, rect, initialConusSelection]);
 
   // Draw shapefile overlay
   useEffect(() => {

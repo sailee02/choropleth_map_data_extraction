@@ -120,12 +120,33 @@ export default function MapView({ geojson, uploadedImageUrl, isLoading }) {
 
   const onEachFeature = (feature, layer) => {
     const props = feature.properties || {};
-    const countyName = props.name || props.GEOID; // Use county name if available, fallback to GEOID
-    if (props.rgb) {
-      layer.bindTooltip(`${countyName}<br/>RGB: ${props.rgb.join(", ")}`);
+    const countyName = props.name || props.GEOID;
+    const stateName = props.state_name || "";
+    const stateAbbr = props.state_abbr || props.STUSPS || "";
+    
+    // Format: "County Name, State Abbreviation" on first line, value on second line
+    let tooltipContent = "";
+    
+    // Use state abbreviation if available, otherwise use full state name
+    const stateDisplay = stateAbbr || stateName;
+    if (stateDisplay) {
+      tooltipContent = `${countyName}, ${stateDisplay}`;
     } else {
-      layer.bindTooltip(`${countyName}<br/>RGB: N/A`);
+      tooltipContent = countyName;
     }
+    
+    // Add value on second line (just the value, no "Value:" prefix)
+    if (props.value !== null && props.value !== undefined) {
+      // Format value to 2 decimal places
+      const valueStr = typeof props.value === 'number' ? props.value.toFixed(2) : props.value;
+      tooltipContent += `<br/>${valueStr}`;
+    }
+    
+    layer.bindTooltip(tooltipContent, {
+      permanent: false,
+      direction: 'top',
+      className: 'custom-tooltip'
+    });
   };
 
 
