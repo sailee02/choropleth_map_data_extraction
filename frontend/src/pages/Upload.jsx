@@ -1,0 +1,756 @@
+import React, { useState, useEffect, useRef } from "react";
+import MapView from "../components/MapView";
+import ImageSelector from "../components/ImageSelector";
+import RegionSelector from "../components/RegionSelector";
+import LegendTypeSelector from "../components/LegendTypeSelector";
+import { uploadImage, fetchGeoJSON, downloadCsvBlob, detectBounds, setBoundsManually, regenerateOverlay } from "../api";
+
+export default function Upload({ onNavigateToHome }) {
+  const [geojson, setGeojson] = useState(null);
+  const [message, setMessage] = useState("");
+  const [layer, setLayer] = useState("uploaded");
+  const [nClusters, setNClusters] = useState(6);
+  const [projection, setProjection] = useState("5070"); 
+  const [uploadedImageUrl, setUploadedImageUrl] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [showLegendTypeSelector, setShowLegendTypeSelector] = useState(false);
+  const [showImageSelector, setShowImageSelector] = useState(false);
+  const [showRegionSelector, setShowRegionSelector] = useState(false);
+  const [legendSelection, setLegendSelection] = useState(null);
+  const [legendTypeInfo, setLegendTypeInfo] = useState(null); 
+  const [regionSelections, setRegionSelections] = useState(null); 
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const [outputCsvFilename, setOutputCsvFilename] = useState(null);
+  const [csvDownloading, setCsvDownloading] = useState(false);
+  const [csvDownloadError, setCsvDownloadError] = useState("");
+  const [uploadId, setUploadId] = useState(null);
+  const [overlayUrl, setOverlayUrl] = useState(null);
+  const [autoBounds, setAutoBounds] = useState(null);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [showManualBounds, setShowManualBounds] = useState(false);
+  const [manualBoundsJson, setManualBoundsJson] = useState("");
+  const imageDisplayRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (uploadedImageUrl) {
+        URL.revokeObjectURL(uploadedImageUrl);
+      }
+    };
+  }, [uploadedImageUrl]);
+
+  const handleFileSelect = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (uploadedImageUrl) {
+      URL.revokeObjectURL(uploadedImageUrl);
+    }
+
+    setUploadedFile(file);
+    setOutputCsvFilename(null);
+    setCsvDownloadError("");
+    setGeojson(null);
+    setLegendSelection(null);
+    setLegendTypeInfo(null);
+    setRegionSelections(null);
+    setUploadId(null);
+    setOverlayUrl(null);
+    setAutoBounds(null);
+    setMessage("Running edge detection to find the map panel...");
+    setIsDetecting(true);
+
+    const imageUrl = URL.createObjectURL(file);
+    setUploadedImageUrl(imageUrl);
+
+    setTimeout(() => {
+      if (imageDisplayRef.current) {
+        imageDisplayRef.current.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }
+    }, 100);
+
+    try {
+      const resp = await detectBounds(file);
+      const data = resp.data || {};
+      const detectedId = data.uploadId || null;
+      setUploadId(detectedId);
+      setAutoBounds(data.bounds || null);
+      setOverlayUrl(null);  
+      setMessage("Bounds detected. Please select the legend area, then click 'Process Image'.");
+    } catch (err) {
+      console.error(err);
+      setUploadId(null);
+      setOverlayUrl(null);
+      setAutoBounds(null);
+      setMessage(
+        "Bounds detection failed: " + (err.response?.data?.error || err.message)
+      );
+    } finally {
+      setIsDetecting(false);
+    }
+  };
+
+  const handleLegendTypeConfirm = (typeInfo) => {
+    setLegendTypeInfo(typeInfo);
+    setShowLegendTypeSelector(false);
+    setShowImageSelector(true);
+  };
+
+  const handleLegendTypeCancel = () => {
+    setShowLegendTypeSelector(false);
+  };
+
+  const handleLegendSelection = (selection, legendOverrides) => {
+    setLegendSelection(selection);
+    if (legendOverrides && typeof legendOverrides === "object") {
+      setLegendTypeInfo((prev) => {
+        const next = { ...(prev || {}), ...legendOverrides };
+        if (
+          legendOverrides.binLabelsOverride != null &&
+          legendOverrides.binValuesOverride === undefined
+        ) {
+          delete next.binValuesOverride;
+        }
+        return next;
+      });
+    }
+    setShowImageSelector(false);
+    setMessage("Legend area selected. Now mark the CONUS region (required) and optionally Alaska/Hawaii if present.");
+
+    setShowRegionSelector(true);
+  };
+
+  const handleRegionSelection = (regions) => {
+    setRegionSelections(regions);
+    setShowRegionSelector(false);
+    const hasOptionalRegions = regions.alaska || regions.hawaii;
+    setMessage(hasOptionalRegions 
+      ? "CONUS and optional regions marked. Click 'Process Image' to continue."
+      : "CONUS marked. Click 'Process Image' to continue.");
+  };
+
+  const handleSkipRegions = () => {
+    setRegionSelections({ alaska: null, hawaii: null });
+    setShowRegionSelector(false);
+    setMessage("Legend area selected. Click 'Process Image' to continue.");
+  };
+
+  const handleProcessImage = async () => {
+    if (!uploadedFile || !legendSelection || !legendTypeInfo) {
+      setMessage("Please select a file, legend type, and legend area first.");
+      return;
+    }
+    if (!uploadId) {
+      setMessage("Bounds not ready yet. Wait for edge detection to finish.");
+      return;
+    }
+    if (isDetecting) {
+      setMessage("Bounds detection still running. Please wait before processing.");
+      return;
+    }
+
+    setIsLoading(true);
+    setMessage("Processing image with legend...");
+
+    try {
+      const resp = await uploadImage(
+        uploadedFile,
+        layer,
+        nClusters,
+        legendSelection,
+        uploadId,
+        regionSelections,
+        projection,
+        legendTypeInfo
+      );
+      if (resp.data?.error) {
+        setMessage("Processing error: " + resp.data.error);
+        setIsLoading(false);
+        return;
+      }
+      if (resp.data?.uploadId) {
+        setUploadId(resp.data.uploadId);
+      }
+      if (resp.data?.csv) {
+        setOutputCsvFilename(resp.data.csv);
+      }
+      setCsvDownloadError("");
+      setMessage("Processing complete, loading layer...");
+      const geo = await fetchGeoJSON(layer);
+      setGeojson(geo.data);
+      setMessage("Layer loaded.");
+    } catch (err) {
+      console.error(err);
+      setMessage(
+        "Processing failed: " + (err.response?.data?.error || err.message)
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCsvDownload = async () => {
+    const fname = outputCsvFilename || `${layer}.csv`;
+    setCsvDownloadError("");
+    setCsvDownloading(true);
+    try {
+      await downloadCsvBlob(fname);
+    } catch (err) {
+      setCsvDownloadError(
+        err instanceof Error ? err.message : "CSV download failed."
+      );
+    } finally {
+      setCsvDownloading(false);
+    }
+  };
+
+  const handleManualBoundsSubmit = async () => {
+    if (!uploadId) {
+      setMessage("Please upload a file first.");
+      return;
+    }
+    if (!manualBoundsJson.trim()) {
+      setMessage("Please paste the bounds JSON from ChatGPT.");
+      return;
+    }
+
+    try {
+      const boundsData = JSON.parse(manualBoundsJson);
+      const resp = await setBoundsManually(uploadId, boundsData);
+      setMessage("Manual bounds saved successfully! Now select the legend area and click 'Process Image'.");
+      setAutoBounds(boundsData);
+      setShowManualBounds(false);
+      setManualBoundsJson("");
+    } catch (err) {
+      setMessage("Invalid JSON: " + (err.response?.data?.error || err.message));
+    }
+  };
+
+  const handleCancel = () => {
+    if (uploadedImageUrl) {
+      URL.revokeObjectURL(uploadedImageUrl);
+    }
+    setUploadedImageUrl(null);
+    setUploadedFile(null);
+    setGeojson(null);
+    setLegendSelection(null);
+    setRegionSelections(null);
+    setUploadId(null);
+    setOutputCsvFilename(null);
+    setCsvDownloadError("");
+    setOverlayUrl(null);
+    setAutoBounds(null);
+    setShowImageSelector(false);
+    setShowRegionSelector(false);
+    setIsLoading(false);
+    setIsDetecting(false);
+    setShowManualBounds(false);
+    setManualBoundsJson("");
+    setMessage("");
+
+    const fileInput = document.querySelector('input[type="file"]');
+    if (fileInput) {
+      fileInput.value = "";
+    }
+    onNavigateToHome?.();
+  };
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        fontFamily:
+          "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        backgroundColor: "#fafafa",
+        color: "#333",
+      }}
+    >
+      
+      <section
+        style={{
+          padding: "60px 0",
+          textAlign: "center",
+          maxWidth: "1200px",
+          margin: "0 auto",
+          paddingLeft: "24px",
+          paddingRight: "24px",
+        }}
+      >
+        <div
+          style={{
+            backgroundColor: "white",
+            padding: "40px",
+            borderRadius: "8px",
+            border: "1px solid #e5e5e5",
+            maxWidth: "600px",
+            margin: "0 auto",
+          }}
+        >
+          <h2
+            style={{
+              fontSize: "24px",
+              fontWeight: "600",
+              margin: "0 0 16px 0",
+              color: "#333",
+            }}
+          >
+            Upload your files
+          </h2>
+          <p
+            style={{
+              fontSize: "16px",
+              color: "#666",
+              margin: "0 0 24px 0",
+              lineHeight: "1.5",
+            }}
+          >
+            We'll extract county-level values from your choropleth.
+          </p>
+
+
+          
+          <div style={{ marginBottom: "24px", textAlign: "left" }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: "16px",
+                fontWeight: "600",
+                marginBottom: "12px",
+                color: "#333",
+              }}
+            >
+              Projection (CRS)
+            </label>
+            <div style={{ display: "flex", gap: "16px", marginBottom: "8px" }}>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="radio"
+                  name="projection"
+                  value="5070"
+                  checked={projection === "5070"}
+                  onChange={(e) => setProjection(e.target.value)}
+                  style={{ margin: "0" }}
+                />
+                <span style={{ fontSize: "14px", color: "#666" }}>
+                  EPSG:5070 (NAD83 / Conus Albers)
+                </span>
+              </label>
+            </div>
+            <p
+              style={{
+                fontSize: "12px",
+                color: "#999",
+                margin: "0",
+                lineHeight: "1.4",
+              }}
+            >
+              EPSG:5070 (CONUS Albers) is typical for printed US maps.
+            </p>
+          </div>
+
+          
+          <div style={{ marginBottom: "24px", textAlign: "left" }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: "16px",
+                fontWeight: "600",
+                marginBottom: "12px",
+                color: "#333",
+              }}
+            >
+              Choropleth image (PNG/JPG)
+            </label>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleFileSelect}
+              style={{
+                width: "100%",
+                padding: "12px",
+                border: "1px solid #ddd",
+                borderRadius: "6px",
+                fontSize: "14px",
+                backgroundColor: "white",
+              }}
+            />
+          </div>
+
+          
+          <div style={{ display: "flex", gap: "16px", justifyContent: "center", flexWrap: "wrap" }}>
+            <button
+              onClick={() =>
+                document.querySelector('input[type="file"]')?.click()
+              }
+              style={{
+                backgroundColor: "#333",
+                color: "white",
+                border: "none",
+                padding: "12px 24px",
+                borderRadius: "6px",
+                fontSize: "16px",
+                fontWeight: "500",
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+              }}
+            >
+              Select File
+            </button>
+            
+            {uploadedFile && (
+              <button
+                onClick={() => {
+                  if (isDetecting || !uploadId) {
+                    setMessage("Wait for bounds detection before selecting the legend area.");
+                    return;
+                  }
+                  setShowLegendTypeSelector(true);
+                }}
+                disabled={isDetecting || !uploadId}
+                style={{
+                  backgroundColor:
+                    isDetecting || !uploadId ? "#94a3b8" : "#007bff",
+                  color: "white",
+                  border: "none",
+                  padding: "12px 24px",
+                  borderRadius: "6px",
+                  fontSize: "16px",
+                  fontWeight: "500",
+                  cursor: isDetecting || !uploadId ? "not-allowed" : "pointer",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                Select Legend Area
+              </button>
+            )}
+            
+            {uploadedFile && legendSelection && (
+              <button
+                onClick={handleProcessImage}
+                disabled={isLoading || isDetecting || !uploadId}
+                style={{
+                  backgroundColor:
+                    isLoading || isDetecting || !uploadId ? "#ccc" : "#28a745",
+                  color: "white",
+                  border: "none",
+                  padding: "12px 24px",
+                  borderRadius: "6px",
+                  fontSize: "16px",
+                  fontWeight: "500",
+                  cursor:
+                    isLoading || isDetecting || !uploadId ? "not-allowed" : "pointer",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {isLoading
+                  ? "Processing..."
+                  : isDetecting
+                  ? "Detecting Bounds..."
+                  : !uploadId
+                  ? "Awaiting Bounds"
+                  : "Process Image"}
+              </button>
+            )}
+            
+            <button
+              onClick={handleCancel}
+              style={{
+                backgroundColor: "#f5f5f5",
+                color: "#333",
+                border: "1px solid #ddd",
+                padding: "12px 24px",
+                borderRadius: "6px",
+                fontSize: "16px",
+                fontWeight: "500",
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+
+          
+          {message && (
+            <div
+              style={{
+                marginTop: "24px",
+                padding: "16px",
+                backgroundColor:
+                  message.includes("error") || message.includes("failed")
+                    ? "#fef2f2"
+                    : "#f0f9ff",
+                color:
+                  message.includes("error") || message.includes("failed")
+                    ? "#dc2626"
+                    : "#0369a1",
+                borderRadius: "6px",
+                fontSize: "14px",
+                textAlign: "left",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  marginBottom: "8px",
+                }}
+              >
+                <span style={{ fontSize: "16px" }}>
+                  {isLoading
+                    ? "⏳"
+                    : message.includes("error") || message.includes("failed")
+                    ? "❌"
+                    : "ℹ️"}
+                </span>
+                <strong>Status</strong>
+              </div>
+              <div>{message}</div>
+            </div>
+          )}
+
+
+          
+          {geojson && (
+            <div style={{ marginTop: "24px" }}>
+              <button
+                type="button"
+                onClick={handleCsvDownload}
+                disabled={csvDownloading}
+                style={{
+                  display: "inline-block",
+                  backgroundColor: csvDownloading ? "#94a3b8" : "#10b981",
+                  color: "white",
+                  border: "none",
+                  cursor: csvDownloading ? "not-allowed" : "pointer",
+                  padding: "12px 24px",
+                  borderRadius: "6px",
+                  fontSize: "16px",
+                  fontWeight: "500",
+                  transition: "all 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  if (!csvDownloading) e.target.style.backgroundColor = "#059669";
+                }}
+                onMouseLeave={(e) => {
+                  if (!csvDownloading) e.target.style.backgroundColor = "#10b981";
+                }}
+              >
+                {csvDownloading ? "Preparing download…" : "📥 Download CSV Data"}
+              </button>
+              {csvDownloadError ? (
+                <p
+                  style={{
+                    marginTop: "10px",
+                    color: "#b91c1c",
+                    fontSize: "14px",
+                    maxWidth: "480px",
+                  }}
+                >
+                  {csvDownloadError}
+                </p>
+              ) : null}
+            </div>
+          )}
+        </div>
+      </section>
+
+
+      
+      {(uploadedImageUrl || geojson) && (
+        <section
+          ref={imageDisplayRef}
+          style={{
+            padding: "60px 0",
+            maxWidth: "1200px",
+            margin: "0 auto",
+            paddingLeft: "24px",
+            paddingRight: "24px",
+          }}
+        >
+          <h3
+            style={{
+              fontSize: "32px",
+              fontWeight: "700",
+              margin: "0 0 40px 0",
+              textAlign: "center",
+              color: "#333",
+            }}
+          >
+            {geojson ? "Processed Choropleth Map" : "Original Image"}
+          </h3>
+          <div
+            style={{
+              backgroundColor: "white",
+              borderRadius: "8px",
+              border: "1px solid #e5e5e5",
+              overflow: "hidden",
+              height: "600px",
+              position: "relative",
+            }}
+          >
+            {geojson ? (
+              <MapView
+                geojson={geojson}
+                uploadedImageUrl={uploadedImageUrl}
+                isLoading={isLoading}
+              />
+            ) : (
+              <div
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  position: "relative",
+                  padding: "16px",
+                  boxSizing: "border-box",
+                }}
+              >
+                {uploadedImageUrl && !geojson && (
+                  <div
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <figure
+                      style={{
+                        margin: 0,
+                        width: "100%",
+                        height: "100%",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        backgroundColor: "#f8fafc",
+                        borderRadius: "6px",
+                        padding: "12px",
+                      }}
+                    >
+                      <img
+                        src={uploadedImageUrl}
+                        alt="Uploaded choropleth map"
+                        style={{
+                          maxWidth: "100%",
+                          maxHeight: "100%",
+                          objectFit: "contain",
+                          borderRadius: "4px",
+                        }}
+                      />
+                      <figcaption style={{ marginTop: "8px", color: "#64748b" }}>
+                        Original Image
+                      </figcaption>
+                    </figure>
+                  </div>
+                )}
+                {(isLoading || isDetecting) && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      backgroundColor: "rgba(255, 255, 255, 0.9)",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      zIndex: 10,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: "50px",
+                        height: "50px",
+                        border: "4px solid #f3f3f3",
+                        borderTop: "4px solid #333",
+                        borderRadius: "50%",
+                        animation: "spin 1s linear infinite",
+                        marginBottom: "20px",
+                      }}
+                    ></div>
+                    <p
+                      style={{
+                        fontSize: "18px",
+                        fontWeight: "500",
+                        color: "#333",
+                        margin: "0",
+                        textAlign: "center",
+                      }}
+                    >
+                      {isLoading
+                        ? "Processing your image..."
+                        : "Detecting map bounds..."}
+                    </p>
+                    <p
+                      style={{
+                        fontSize: "14px",
+                        color: "#666",
+                        margin: "8px 0 0 0",
+                        textAlign: "center",
+                      }}
+                    >
+                      {isLoading
+                        ? "This may take a few moments"
+                        : "Sit tight while we outline the map panel"}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+      
+      
+      {showLegendTypeSelector && uploadedImageUrl && (
+        <LegendTypeSelector
+          imageUrl={uploadedImageUrl}
+          onConfirm={handleLegendTypeConfirm}
+          onCancel={handleLegendTypeCancel}
+        />
+      )}
+      
+      
+      {showImageSelector && uploadedImageUrl && (
+        <ImageSelector
+          imageUrl={uploadedImageUrl}
+          uploadId={uploadId}
+          legendTypeInfo={legendTypeInfo}
+          onSelectionComplete={handleLegendSelection}
+          onCancel={() => setShowImageSelector(false)}
+        />
+      )}
+
+      
+      {showRegionSelector && uploadedImageUrl && (
+        <RegionSelector
+          imageUrl={uploadedImageUrl}
+          uploadId={uploadId}
+          projection={projection}
+          onSelectionComplete={handleRegionSelection}
+          onSkip={handleSkipRegions}
+          onCancel={handleSkipRegions}
+        />
+      )}
+    </div>
+  );
+}

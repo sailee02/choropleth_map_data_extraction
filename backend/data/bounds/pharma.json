@@ -1,0 +1,1 @@
+{"type": "map_canvas_bounds", "image_size": {"width": 1600, "height": 1280}, "canvases": [{"name": "CONUS", "bbox": [35, 40, 1068, 1254], "polygon": [[35, 40], [1068, 40], [1068, 1254], [35, 1254]], "confidence": 0.45, "rect4": null}]}
