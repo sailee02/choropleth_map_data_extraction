@@ -408,8 +408,8 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
       top: top,
       width: width,
       height: height,
-      border: '2px solid #ff6b00',
-      backgroundColor: 'rgba(255, 107, 0, 0.1)',
+      border: '3px solid #10b981',
+      backgroundColor: 'rgba(16, 185, 129, 0.08)',
       pointerEvents: 'none',
       zIndex: 10
     };
@@ -419,12 +419,6 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
     const selection = regions[region];
     if (!selection || !imageRef.current) return null;
 
-    
-    if (region === 'conus' || region === 'alaska') {
-      return null;
-    }
-
-    
     if (currentRegion && currentRegion !== region) {
       return null;
     }
@@ -432,23 +426,15 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
     const rect = imageRef.current.getBoundingClientRect();
     const imageWidth = imageRef.current.naturalWidth;
     const imageHeight = imageRef.current.naturalHeight;
-    
-    const regionColors = {
-      conus: { border: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)' },
-      alaska: { border: '#3b82f6', bg: 'rgba(59, 130, 246, 0.1)' },
-      hawaii: { border: '#10b981', bg: 'rgba(16, 185, 129, 0.1)' }
-    };
-    
-    const colors = regionColors[region] || regionColors.alaska;
-    
+
     return {
       position: 'absolute',
       left: (selection.x / imageWidth) * rect.width,
       top: (selection.y / imageHeight) * rect.height,
       width: (selection.width / imageWidth) * rect.width,
       height: (selection.height / imageHeight) * rect.height,
-      border: `2px solid ${colors.border}`,
-      backgroundColor: colors.bg,
+      border: '3px solid #10b981',
+      backgroundColor: 'rgba(16, 185, 129, 0.08)',
       pointerEvents: 'none',
       zIndex: 10
     };
@@ -609,7 +595,7 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
               }
             }}
             style={{
-              backgroundColor: regions.conus ? '#fca5a5' : '#ef4444',
+              backgroundColor: regions.conus ? '#93c5fd' : '#3b82f6',
               color: 'white',
               border: 'none',
               padding: '8px 16px',
@@ -656,8 +642,8 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
               if (!newRegion) setCursorPos(null);
             }}
             style={{
-              backgroundColor: currentRegion === 'hawaii' ? '#10b981' : regions.hawaii ? '#6ee7b7' : '#e5e7eb',
-              color: currentRegion === 'hawaii' || regions.hawaii ? 'white' : '#666',
+              backgroundColor: (currentRegion === 'hawaii' || regions.hawaii) ? '#93c5fd' : '#3b82f6',
+              color: 'white',
               border: 'none',
               padding: '8px 16px',
               borderRadius: '6px',
@@ -670,19 +656,6 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
             {regions.hawaii ? '✓' : ''} Mark Hawaii
           </button>
         </div>
-
-        {currentRegion === 'hawaii' && (
-          <p style={{
-            margin: '0 0 12px 0',
-            color: '#10b981',
-            fontSize: '13px',
-            fontWeight: '500'
-          }}>
-            Click and drag to mark Hawaii region
-            <br />
-            <span style={{ fontSize: '11px', fontWeight: '400' }}>Crosshair guides will help you align precisely</span>
-          </p>
-        )}
         
         <div 
           ref={containerRef}
@@ -750,7 +723,7 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
                 position: 'absolute',
                 top: '-20px',
                 left: 0,
-                backgroundColor: '#ef4444',
+                backgroundColor: '#10b981',
                 color: 'white',
                 padding: '2px 6px',
                 borderRadius: '4px',
@@ -772,7 +745,7 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
                 position: 'absolute',
                 top: '-20px',
                 left: 0,
-                backgroundColor: '#3b82f6',
+                backgroundColor: '#10b981',
                 color: 'white',
                 padding: '2px 6px',
                 borderRadius: '4px',
@@ -877,6 +850,23 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
           justifyContent: 'center'
         }}>
           <button
+            onClick={onSkip}
+            style={{
+              backgroundColor: '#6c757d',
+              color: 'white',
+              border: 'none',
+              padding: '10px 20px',
+              borderRadius: '6px',
+              fontSize: '14px',
+              fontWeight: '500',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            Skip
+          </button>
+
+          <button
             onClick={handleConfirmAll}
             disabled={!regions.conus}
             style={{
@@ -892,24 +882,7 @@ export default function RegionSelector({ imageUrl, uploadId, projection, onSelec
               opacity: regions.conus ? 1 : 0.6
             }}
           >
-            {regions.conus ? 'Confirm & Continue' : 'Mark CONUS to Continue'}
-          </button>
-          
-          <button
-            onClick={onSkip}
-            style={{
-              backgroundColor: '#6c757d',
-              color: 'white',
-              border: 'none',
-              padding: '10px 20px',
-              borderRadius: '6px',
-              fontSize: '14px',
-              fontWeight: '500',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease'
-            }}
-          >
-            Skip
+            Continue
           </button>
         </div>
       </div>

@@ -700,6 +700,39 @@ export default function AlaskaManualAlign({
                   zIndex: 5,
                 }}
               />
+
+              {rect && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: `${rect.x + rect.width / 2}px`,
+                    top: `${rect.y + rect.height / 2}px`,
+                    width: '50px',
+                    height: '50px',
+                    borderRadius: '50%',
+                    backgroundColor: 'white',
+                    border: '2px solid #3b82f6',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'move',
+                    zIndex: 22,
+                    transform: 'translate(-50%, -50%)',
+                    pointerEvents: 'auto',
+                    userSelect: 'none',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+                  }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    handleShapefileMouseDown(e);
+                  }}
+                  title="Drag to move overlay"
+                >
+                  <span style={{ fontSize: '10px', color: '#3b82f6', fontWeight: '700', letterSpacing: '0.5px' }}>
+                    DRAG
+                  </span>
+                </div>
+              )}
               
               
               {getCorners().length === 4 && getCorners().map((corner, index) => {

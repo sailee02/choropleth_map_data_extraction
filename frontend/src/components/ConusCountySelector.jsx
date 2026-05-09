@@ -650,10 +650,10 @@ export default function ConusCountySelector({
               style={{
                 position: 'relative',
                 display: 'block',
-                border: '3px solid #ef4444',
+                border: '3px solid #10b981',
                 borderRadius: '6px',
                 overflow: 'hidden',
-                backgroundColor: '#fef2f2',
+                backgroundColor: '#f0fdf4',
                 cursor: selectedPoints.length < 4 ? 'crosshair' : 'default',
                 width: '100%',
                 aspectRatio: '16/10',
@@ -1043,6 +1043,40 @@ export default function ConusCountySelector({
           flexWrap: 'wrap',
           justifyContent: 'center'
         }}>
+          <button
+            onClick={onCancel}
+            style={{
+              backgroundColor: '#6c757d',
+              color: 'white',
+              border: 'none',
+              padding: '10px 20px',
+              borderRadius: '6px',
+              fontSize: '14px',
+              fontWeight: '500',
+              cursor: 'pointer'
+            }}
+          >
+            Cancel
+          </button>
+
+          {selectedPoints.length > 0 && (
+            <button
+              onClick={handleReset}
+              style={{
+                backgroundColor: '#6c757d',
+                color: 'white',
+                border: 'none',
+                padding: '10px 20px',
+                borderRadius: '6px',
+                fontSize: '14px',
+                fontWeight: '500',
+                cursor: 'pointer'
+              }}
+            >
+              Reset All
+            </button>
+          )}
+
           {selectedPoints.length > 0 && (
             <button
               onClick={handleUndo}
@@ -1099,40 +1133,6 @@ export default function ConusCountySelector({
               Confirm Alignment
             </button>
           )}
-          
-          {selectedPoints.length > 0 && (
-            <button
-              onClick={handleReset}
-              style={{
-                backgroundColor: '#6c757d',
-                color: 'white',
-                border: 'none',
-                padding: '10px 20px',
-                borderRadius: '6px',
-                fontSize: '14px',
-                fontWeight: '500',
-                cursor: 'pointer'
-              }}
-            >
-              Reset All
-            </button>
-          )}
-          
-          <button
-            onClick={onCancel}
-            style={{
-              backgroundColor: '#6c757d',
-              color: 'white',
-              border: 'none',
-              padding: '10px 20px',
-              borderRadius: '6px',
-              fontSize: '14px',
-              fontWeight: '500',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
         </div>
       </div>
     </div>

@@ -36,8 +36,10 @@ export default function ImageSelector({
   const [reviewRows, setReviewRows] = useState([]);
   const [legendCropUrl, setLegendCropUrl] = useState('');
   const [clientOcrLoading, setClientOcrLoading] = useState(false);
+  const [activeColorRowIdx, setActiveColorRowIdx] = useState(null);
   const imageRef = useRef(null);
   const containerRef = useRef(null);
+  const cropImgRef = useRef(null);
 
   const isBinned = legendTypeInfo && legendTypeInfo.type === 'binned';
 
@@ -188,7 +190,7 @@ export default function ImageSelector({
       setReviewRows(
         bins.map((b) => ({
           rgb: b.rgb,
-          binRange: String(b.binRange ?? b.label ?? '').trim(),
+          binRange: String(b.binRange ?? b.label ?? "").trim(),
         }))
       );
       setPhase('review');
@@ -204,13 +206,25 @@ export default function ImageSelector({
   const handleConfirmReview = () => {
     if (!pendingNatSelection) return;
     const binLabelsOverride = [];
+    const binColorsOverride = [];
     for (let i = 0; i < reviewRows.length; i++) {
       const row = reviewRows[i];
       const text = String(row.binRange ?? "").trim();
       binLabelsOverride.push(text || `Bin ${i + 1}`);
+      const rgb = Array.isArray(row.rgb) ? row.rgb : null;
+      if (rgb && rgb.length >= 3) {
+        binColorsOverride.push([
+          Math.max(0, Math.min(255, Math.round(Number(rgb[0]) || 0))),
+          Math.max(0, Math.min(255, Math.round(Number(rgb[1]) || 0))),
+          Math.max(0, Math.min(255, Math.round(Number(rgb[2]) || 0))),
+        ]);
+      } else {
+        binColorsOverride.push(null);
+      }
     }
     onSelectionComplete(pendingNatSelection, {
       binLabelsOverride,
+      binColorsOverride,
     });
   };
 
@@ -221,6 +235,7 @@ export default function ImageSelector({
     setLegendCropUrl('');
     setClientOcrLoading(false);
     setPreviewError('');
+    setActiveColorRowIdx(null);
   };
 
   const handleClearSelection = () => {
@@ -269,6 +284,45 @@ export default function ImageSelector({
   const rgbCss = (rgb) => {
     if (!rgb || rgb.length < 3) return '#ccc';
     return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+  };
+
+  const handleCropClickPickColor = async (e) => {
+    if (phase !== 'review') return;
+    if (activeColorRowIdx == null || activeColorRowIdx < 0 || activeColorRowIdx >= reviewRows.length) {
+      return;
+    }
+    const imgEl = cropImgRef.current;
+    if (!imgEl) return;
+
+    const rect = imgEl.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
+
+    const natW = imgEl.naturalWidth || 0;
+    const natH = imgEl.naturalHeight || 0;
+    if (natW < 2 || natH < 2) return;
+    const px = Math.max(0, Math.min(natW - 1, Math.round((x / rect.width) * natW)));
+    const py = Math.max(0, Math.min(natH - 1, Math.round((y / rect.height) * natH)));
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = natW;
+      canvas.height = natH;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(imgEl, 0, 0);
+      const d = ctx.getImageData(px, py, 1, 1).data;
+      const rgb = [d[0], d[1], d[2]];
+      setReviewRows((rows) => {
+        const next = [...rows];
+        next[activeColorRowIdx] = { ...next[activeColorRowIdx], rgb };
+        return next;
+      });
+    } catch {
+      // ignore
+    }
   };
 
   return (
@@ -370,6 +424,7 @@ export default function ImageSelector({
                   }}
                 >
                   <img
+                    ref={cropImgRef}
                     src={legendCropUrl}
                     alt="Cropped legend selection"
                     style={{
@@ -379,23 +434,26 @@ export default function ImageSelector({
                       height: 'auto',
                       objectFit: 'contain',
                       display: 'block',
+                      cursor: activeColorRowIdx == null ? 'default' : 'crosshair',
                     }}
+                    onClick={handleCropClickPickColor}
                   />
                 </div>
               </div>
             ) : null}
+            
             <p
               style={{
-                margin: '0 0 16px 0',
-                color: '#666',
-                fontSize: '14px',
+                margin: '-6px 0 16px 0',
+                color: '#64748b',
+                fontSize: '13px',
                 textAlign: 'center',
                 maxWidth: '560px',
               }}
             >
-              Each row reads the range beside that colour (per-bin OCR). Edit any
-              range if needed — these define each bin; the CSV uses one numeric value
-              per county (a representative value inside that interval).
+              Fix color: click on color box in the table, then click the correct color on the legend image.
+              <br />
+              Fix range: edit the range in the table.
             </p>
             {clientOcrLoading ? (
               <p
@@ -505,13 +563,14 @@ export default function ImageSelector({
                           width: '36px',
                           height: '24px',
                           borderRadius: '4px',
-                          border: '1px solid #cbd5e1',
+                          border: activeColorRowIdx === i ? '2px solid #2563eb' : '1px solid #cbd5e1',
                           backgroundColor: rgbCss(row.rgb),
+                          cursor: 'pointer',
+                          boxShadow: activeColorRowIdx === i ? '0 0 0 3px rgba(37, 99, 235, 0.15)' : 'none',
                         }}
+                        title="Click to select this bin for colour picking"
+                        onClick={() => setActiveColorRowIdx(i)}
                       />
-                      <span style={{ marginLeft: '8px', color: '#64748b', fontSize: '11px' }}>
-                        {row.rgb?.join(', ')}
-                      </span>
                     </td>
                     <td style={{ padding: '8px 12px' }}>
                       <input
@@ -530,7 +589,7 @@ export default function ImageSelector({
                           borderRadius: '4px',
                           fontSize: '13px',
                         }}
-                        placeholder="e.g. 5.20–5.80"
+                        placeholder="Text from legend (numbers, words, or both)"
                       />
                     </td>
                   </tr>

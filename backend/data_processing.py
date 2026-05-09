@@ -42,6 +42,38 @@ SHAPEFILE_PATH = os.environ.get('SHAPEFILE_PATH', os.path.join(BASE_DIR, 'cb_202
 FULL_SHAPEFILE_PATH = os.environ.get('FULL_SHAPEFILE_PATH', os.path.join(BASE_DIR, 'cb_2024_us_county_500k', 'cb_2024_us_county_500k.shp'))
 DATA_DIR = os.environ.get('DATA_DIR', 'data')
 
+_tesseract_missing_logged = False
+
+
+def _tesseract_runnable():
+    import shutil
+    if shutil.which('tesseract'):
+        return True
+    try:
+        import pytesseract
+        cmd = getattr(pytesseract.pytesseract, 'tesseract_cmd', None)
+        if cmd and os.path.isfile(cmd):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _warn_if_tesseract_missing(context='Legend OCR'):
+    """Log once if Tesseract cannot run; return False so callers can skip OCR."""
+    global _tesseract_missing_logged
+    if _tesseract_runnable():
+        return True
+    if not _tesseract_missing_logged:
+        _tesseract_missing_logged = True
+        print(
+            f'  ⚠ {context}: Tesseract is not available (not on PATH and tesseract_cmd not set). '
+            'Per-bin legend text will be empty. macOS: brew install tesseract; '
+            'then restart the backend so PATH is picked up.'
+        )
+    return False
+
+
 def parse_legend_text(legend_text):
     parsed = []
     for line in legend_text.splitlines():
@@ -165,6 +197,17 @@ def _normalize_ocr_text(text):
     return t
 
 
+def _clean_legend_label_ocr(raw):
+    """Single-line label from OCR: keep letters, digits, common punctuation; trim length."""
+    if not raw:
+        return ''
+    t = ' '.join(str(raw).splitlines())
+    t = re.sub(r'\s+', ' ', t).strip()
+    if len(t) > 140:
+        t = t[:137].rstrip() + '...'
+    return t
+
+
 def _fmt_bin_range_label(lo, hi):
     """Human-readable interval for CSV/geojson (e.g. 6.90-33.10)."""
     return f'{float(lo):.2f}-{float(hi):.2f}'
@@ -211,6 +254,64 @@ def _all_bin_labels_are_placeholders(bin_labels):
         return False
     p = re.compile(r'^Bin\s*\d+\s*$', re.I)
     return all(p.match(str(lbl).strip()) for lbl in bin_labels)
+
+
+def _is_placeholder_bin_label(s):
+    """True for empty strings or 'Bin 1' style OCR noise (not a real range)."""
+    if s is None:
+        return True
+    t = str(s).strip()
+    if not t:
+        return True
+    return bool(re.match(r'^bin\s*\d+\s*$', t, re.I))
+
+
+def _bin_labels_need_numeric_fallback(bin_labels):
+    """True when OCR failed: placeholders, or every row shows the same junk label."""
+    if not bin_labels:
+        return True
+    n = len(bin_labels)
+    substantial = 0
+    for x in bin_labels:
+        if x is None:
+            continue
+        t = str(x).strip()
+        if len(t) < 2:
+            continue
+        if _is_placeholder_bin_label(t):
+            continue
+        if re.match(r'^bin\s*\d+\s*$', t, re.I):
+            continue
+        substantial += 1
+    if substantial >= max(2, (n + 1) // 2):
+        return False
+    if _all_bin_labels_are_placeholders(bin_labels):
+        return True
+    stripped = [str(x).strip() for x in bin_labels if x is not None and str(x).strip()]
+    if len(stripped) < 2:
+        return True
+    if len(set(stripped)) == 1 and (_is_placeholder_bin_label(stripped[0]) or stripped[0].lower().startswith('bin ')):
+        return True
+    return False
+
+
+def _legend_numeric_span_from_text(text):
+    """Min/max numeric span from raw OCR text (fallback when bbox min/max fails)."""
+    if not text or not str(text).strip():
+        return None
+    t = _normalize_ocr_text(str(text))
+    nums = []
+    for m in re.finditer(r'-?\d+\.\d+|-?\d+,\d+|-?\d+[.,]\d+|-?\d+', t):
+        try:
+            nums.append(float(m.group(0).replace(',', '.')))
+        except ValueError:
+            continue
+    if len(nums) < 2:
+        return None
+    lo, hi = min(nums), max(nums)
+    if hi <= lo + 1e-9:
+        return None
+    return lo, hi
 
 
 def _parse_first_range_in_text(text):
@@ -370,20 +471,29 @@ def _ensure_tesseract_configured():
     _ensure_tesseract_configured._done = True
 
 
-def _pil_prepare_for_ocr(pil_rgb):
+def _pil_prepare_for_ocr(pil_rgb, aggressive=False):
     """Upscale + contrast so small legend text is readable by Tesseract."""
     from PIL import Image as PILImage
     from PIL import ImageEnhance, ImageOps
     g = pil_rgb.convert('L')
     g = ImageOps.autocontrast(g, cutoff=1)
-    g = ImageEnhance.Contrast(g).enhance(1.35)
+    g = ImageEnhance.Contrast(g).enhance(1.45)
     w, h = g.size
-    target_h = max(120, h * 3)
-    target_w = max(280, w * 2)
-    if h < 40 or w < 80:
-        scale = max(target_h / max(h, 1), target_w / max(w, 1), 2.0)
-        scale = min(scale, 6.0)
-        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    if w < 1 or h < 1:
+        return g
+    # Legend strips are often only ~20–40 px tall; always give Tesseract enough pixels.
+    min_h = 72 if aggressive else 56
+    min_w = 160 if aggressive else 120
+    scale_h = min_h / h
+    scale_w = min_w / w
+    scale_boost = max(2.8, 3.5) if aggressive else max(2.2, 2.8)
+    scale = max(scale_h, scale_w, scale_boost)
+    scale = min(scale, 8.0)
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    if nw > 2400 or nh > 1200:
+        r = min(2400 / max(nw, 1), 1200 / max(nh, 1), 1.0)
+        nw, nh = max(1, int(nw * r)), max(1, int(nh * r))
+    if nw > w or nh > h:
         g = g.resize((nw, nh), PILImage.Resampling.LANCZOS)
     return g
 
@@ -406,20 +516,29 @@ def _opencv_grayscale_for_ocr(arr_rgb):
     return PILImage.fromarray(th)
 
 
-def _ocr_numpy_rgb_to_string(arr_rgb, psm_list=('6', '11', '7', '13')):
+def _ocr_numpy_rgb_to_string(arr_rgb, psm_list=None, aggressive_prep=False):
     try:
         import pytesseract
         from PIL import Image as PILImage
     except ImportError:
         return ''
     _ensure_tesseract_configured()
+    if not _warn_if_tesseract_missing():
+        return ''
+    if psm_list is None:
+        psm_list = ('7', '6', '11', '13', '8', '12', '3')
     pil = PILImage.fromarray(np.ascontiguousarray(arr_rgb.astype(np.uint8)))
-    variants = [_pil_prepare_for_ocr(pil)]
+    variants = [
+        _pil_prepare_for_ocr(pil, aggressive=aggressive_prep),
+        _pil_prepare_for_ocr(pil, aggressive=True),
+    ]
     cv_pil = _opencv_grayscale_for_ocr(arr_rgb)
     if cv_pil is not None:
         variants.append(cv_pil)
     best = ''
     for prep in variants:
+        if prep is None:
+            continue
         for psm in psm_list:
             try:
                 chunk = pytesseract.image_to_string(prep, config=f'--psm {psm} --oem 1')
@@ -428,6 +547,104 @@ def _ocr_numpy_rgb_to_string(arr_rgb, psm_list=('6', '11', '7', '13')):
             if chunk and len(chunk.strip()) > len(best.strip()):
                 best = chunk
     return best
+
+
+def _ocr_legend_bin_row_text(row_rgb):
+    """Best-effort OCR for one horizontal legend band (one colour row)."""
+    if row_rgb is None or row_rgb.size < 3:
+        return ''
+    h, w = int(row_rgb.shape[0]), int(row_rgb.shape[1])
+    if h < 2 or w < 4:
+        return ''
+    best = ''
+    for frac in (0.28, 0.32, 0.36, 0.40, 0.45, 0.50, 0.55):
+        swatch_w = max(2, min(w - 3, int(w * frac)))
+        x0 = min(swatch_w + 1, w - 2)
+        if x0 >= w - 1:
+            continue
+        right = row_rgb[:, x0:w, :]
+        if right.size == 0:
+            continue
+        cand = _clean_legend_label_ocr(_ocr_numpy_rgb_to_string(right, aggressive_prep=True))
+        if len(cand) > len(best):
+            best = cand
+    if not best.strip():
+        cand = _clean_legend_label_ocr(_ocr_numpy_rgb_to_string(row_rgb, aggressive_prep=True))
+        if len(cand) > len(best):
+            best = cand
+    return best
+
+
+def _vertical_legend_text_per_row(legend_area, num_bins):
+    """Vertical legend: OCR each horizontal band (multi-cut + full-row fallback)."""
+    h, w = int(legend_area.shape[0]), int(legend_area.shape[1])
+    labels = []
+    for i in range(num_bins):
+        y0 = int(i * h / num_bins)
+        y1 = int((i + 1) * h / num_bins) if i < num_bins - 1 else h
+        if y1 <= y0:
+            y1 = y0 + 1
+        margin_y = max(0, int((y1 - y0) * 0.06))
+        ya, yb = y0 + margin_y, y1 - margin_y
+        if yb <= ya:
+            ya, yb = y0, y1
+        if yb <= ya:
+            labels.append('')
+            continue
+        row_rgb = legend_area[ya:yb, :, :]
+        txt = _ocr_legend_bin_row_text(row_rgb)
+        labels.append(txt)
+        print(f'    Legend text (per-bin row) {i + 1}/{num_bins}: {txt!r}')
+    return labels
+
+
+def _extract_legend_label_text_right_of_swatch(legend_area, num_bins):
+    """
+    OCR raw text beside each color swatch: right column for vertical legends,
+    lower band for horizontal legends. No range parsing — numbers, words, or mixed.
+    """
+    if legend_area.size < 3 or num_bins < 2:
+        return []
+    h, w = int(legend_area.shape[0]), int(legend_area.shape[1])
+
+    if h >= w * 0.85:
+        return _vertical_legend_text_per_row(legend_area, num_bins)
+
+    if w >= h * 0.85:
+        best = []
+        best_filled = -1
+        for y_frac, y_label in ((0.52, 'below'), (0.36, 'mid-below')):
+            out_try = []
+            swatch_h = max(3, min(h - 2, int(h * y_frac)))
+            y_text = min(swatch_h + 2, h - 2)
+            for i in range(num_bins):
+                x0 = int(i * w / num_bins)
+                x1 = int((i + 1) * w / num_bins) if i < num_bins - 1 else w
+                if x1 <= x0:
+                    x1 = x0 + 1
+                margin_x = max(0, int((x1 - x0) * 0.06))
+                xa, xb = x0 + margin_x, x1 - margin_x
+                if xb <= xa:
+                    xa, xb = x0, x1
+                if y_text >= h - 1 or xb <= xa:
+                    out_try.append('')
+                    continue
+                band = legend_area[y_text:h, xa:xb, :]
+                cleaned = _clean_legend_label_ocr(_ocr_numpy_rgb_to_string(band, aggressive_prep=True))
+                if not cleaned.strip():
+                    full_col = legend_area[:, xa:xb, :]
+                    cleaned = _clean_legend_label_ocr(_ocr_numpy_rgb_to_string(full_col, aggressive_prep=True))
+                out_try.append(cleaned)
+                print(f'    Legend text ({y_label} swatch) bin {i + 1}/{num_bins}: {cleaned!r}')
+            filled = sum(1 for t in out_try if t and str(t).strip())
+            if filled > best_filled:
+                best_filled = filled
+                best = out_try
+            if filled >= num_bins - 1:
+                break
+        return best
+
+    return _vertical_legend_text_per_row(legend_area, num_bins)
 
 
 def _extract_bin_ranges_per_strip(legend_area, num_bins):
@@ -548,15 +765,15 @@ def _merge_strip_and_full_ocr_bin_labels(num_bins, strip_vals, strip_lbls, full_
             continue
         rl = regex_lbls[i] if regex_lbls and i < len(regex_lbls) else None
         rv = regex_vals[i] if regex_vals and i < len(regex_vals) else None
-        if rl:
+        if rl and not _is_placeholder_bin_label(rl):
             bin_labels.append(rl)
             bin_values.append(float(rv) if rv is not None else float(i))
             continue
-        if sl:
+        if sl and not _is_placeholder_bin_label(sl):
             bin_labels.append(sl)
             bin_values.append(float(sv) if sv is not None else float(i))
             continue
-        if fl:
+        if fl and not _is_placeholder_bin_label(fl):
             bin_labels.append(fl)
             bin_values.append(float(fv) if fv is not None else float(i))
             continue
@@ -582,6 +799,51 @@ def _mask_swatch_like_pixels(pixels_rgb):
     ok &= ~((luma >= 252) & (chroma <= 8))
     ok &= ~((luma >= 253) & (chroma <= 14))
     return ok
+
+
+def _representative_swatch_rgb(pixels_rgb):
+    """
+    Robust representative colour for a swatch region that may contain borders, gaps, or text.
+    Strategy:
+    - drop near-white background and very dark text
+    - prefer higher-chroma pixels (fills) over neutral borders
+    - take median in RGB space for stability
+    """
+    p = np.asarray(pixels_rgb, dtype=np.float64)
+    if p.size == 0:
+        return None
+    mx = p.max(axis=1)
+    mn = p.min(axis=1)
+    chroma = mx - mn
+    luma = 0.299 * p[:, 0] + 0.587 * p[:, 1] + 0.114 * p[:, 2]
+
+    base = np.ones(len(p), dtype=bool)
+    # Remove page background / whitespace.
+    base &= ~((luma >= 252) & (chroma <= 10))
+    base &= ~((luma >= 248) & (chroma <= 6))
+    # Remove very dark pixels (text / outlines).
+    base &= luma >= 40
+    base &= luma <= 248
+
+    pb = p[base]
+    if len(pb) < 25:
+        pb = p
+        chroma_b = chroma
+    else:
+        chroma_b = chroma[base]
+
+    # Prefer swatch fills over grey borders: take the top-chroma subset.
+    try:
+        thr = float(np.quantile(chroma_b, 0.60))
+    except Exception:
+        thr = 0.0
+    thr = max(thr, 8.0)
+    pick = pb[chroma_b >= thr] if len(pb) == len(chroma_b) else pb
+    if pick is None or len(pick) < 25:
+        pick = pb
+
+    med = np.median(pick, axis=0)
+    return np.clip(np.round(med), 0, 255).astype(int).tolist()
 
 
 def _binned_colors_spatial_strips(legend_area, num_bins):
@@ -610,13 +872,11 @@ def _binned_colors_spatial_strips(legend_area, num_bins):
             strip = region[ya:yb, :, :]
             if strip.size == 0:
                 return None
-            p = strip.reshape(-1, 3).astype(np.float64)
-            mask = _mask_swatch_like_pixels(p)
-            good = p[mask]
-            if len(good) < 10:
-                good = p
-            med = np.median(good, axis=0)
-            colors_out.append(np.clip(np.round(med), 0, 255).astype(int))
+            p = strip.reshape(-1, 3)
+            rep = _representative_swatch_rgb(p)
+            if rep is None:
+                return None
+            colors_out.append(np.asarray(rep, dtype=int))
         return [c.tolist() for c in colors_out]
 
     if w >= h * 0.85:
@@ -635,13 +895,11 @@ def _binned_colors_spatial_strips(legend_area, num_bins):
             strip = region[:, xa:xb, :]
             if strip.size == 0:
                 return None
-            p = strip.reshape(-1, 3).astype(np.float64)
-            mask = _mask_swatch_like_pixels(p)
-            good = p[mask]
-            if len(good) < 10:
-                good = p
-            med = np.median(good, axis=0)
-            colors_out.append(np.clip(np.round(med), 0, 255).astype(int))
+            p = strip.reshape(-1, 3)
+            rep = _representative_swatch_rgb(p)
+            if rep is None:
+                return None
+            colors_out.append(np.asarray(rep, dtype=int))
         return [c.tolist() for c in colors_out]
 
     return None
@@ -838,6 +1096,32 @@ def extract_legend_from_selection(image_path, legend_selection, legend_type_info
                 unique_colors = [unique_colors[int(i * step)] for i in range(nb_req)]
 
         num_bins = len(unique_colors)
+
+        # Optional UI override: user-picked colours per bin from legend crop.
+        bco = None
+        if legend_type_info and isinstance(legend_type_info, dict):
+            bco = legend_type_info.get('binColorsOverride')
+        if isinstance(bco, list) and len(bco) == num_bins:
+            coerced = []
+            ok = True
+            for c in bco:
+                if c is None:
+                    ok = False
+                    break
+                if not isinstance(c, (list, tuple)) or len(c) < 3:
+                    ok = False
+                    break
+                try:
+                    r = int(round(float(c[0])))
+                    g = int(round(float(c[1])))
+                    b = int(round(float(c[2])))
+                except Exception:
+                    ok = False
+                    break
+                coerced.append(np.array([max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))], dtype=np.float64))
+            if ok and len(coerced) == num_bins:
+                unique_colors = coerced
+                skip_luminance_sort = True
         global_ocr_txt = _ocr_numpy_rgb_to_string(legend_area)
         regex_vals, regex_lbls = _ranges_ordered_from_full_ocr_text(global_ocr_txt, num_bins)
         strip_vals, strip_lbls = _extract_bin_ranges_per_strip(legend_area, num_bins)
@@ -852,14 +1136,28 @@ def extract_legend_from_selection(image_path, legend_selection, legend_type_info
         bin_values, bin_labels = _merge_strip_and_full_ocr_bin_labels(
             num_bins, strip_vals, strip_lbls, fv, fl, regex_vals, regex_lbls
         )
-        if _all_bin_labels_are_placeholders(bin_labels):
+        right_text = _extract_legend_label_text_right_of_swatch(legend_area, num_bins)
+        for i in range(num_bins):
+            if i >= len(right_text) or not right_text[i]:
+                continue
+            bin_labels[i] = right_text[i]
+            prev_v = bin_values[i] if i < len(bin_values) else float(i)
+            rep = _representative_numeric_from_bin_label(right_text[i], prev_v)
+            if rep is not None and math.isfinite(float(rep)):
+                try:
+                    bin_values[i] = float(rep)
+                except (TypeError, ValueError):
+                    pass
+        if _bin_labels_need_numeric_fallback(bin_labels):
             mm = _legend_area_numeric_min_max(legend_area)
+            if not mm:
+                mm = _legend_numeric_span_from_text(global_ocr_txt)
             if mm:
                 lo_mm, hi_mm = mm
                 ev, el = _equal_interval_bin_ranges(num_bins, lo_mm, hi_mm)
                 if ev is not None:
                     bin_values, bin_labels = ev, el
-                    print(f'  ✓ Replaced Bin placeholders with equal-width ranges from OCR min/max ({lo_mm:g}–{hi_mm:g})')
+                    print(f'  ✓ Replaced weak bin labels with equal-width ranges from OCR numeric span ({lo_mm:g}–{hi_mm:g})')
         legend = []
         for i, color in enumerate(unique_colors):
             label = bin_labels[i]
@@ -906,6 +1204,7 @@ def preview_legend_extraction(image_path, legend_selection, legend_type_info=Non
     lti = copy.deepcopy(legend_type_info) if legend_type_info else {}
     lti.pop('binValuesOverride', None)
     lti.pop('binLabelsOverride', None)
+    lti.pop('binColorsOverride', None)
     legend = extract_legend_from_selection(image_path, legend_selection, lti)
     if not legend:
         return None, 'Could not detect at least two legend colors. Tighten the box around the color swatches or gradient.'
@@ -939,36 +1238,109 @@ def _raster_transform_for_image_and_shp(shp, img_w, img_h):
     minx, miny, maxx, maxy = shp.total_bounds
     return from_bounds(minx, miny, maxx, maxy, img_w, img_h)
 
-def _hawaii_user_rgb_overrides(region_selections):
+
+def _normalize_geoid_fips(raw):
+    """5-digit county GEOID/FIPS for matching shapefile rows and UI payloads."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        if pd.isna(raw):
+            return None
+    except Exception:
+        pass
+    try:
+        f = float(raw)
+        if not math.isfinite(f):
+            return None
+        n = int(round(f))
+        digits = str(abs(n))
+    except (TypeError, ValueError):
+        digits = ''.join((c for c in str(raw).strip() if c.isdigit()))
+    if not digits:
+        return None
+    if len(digits) > 5:
+        digits = digits[-5:]
+    return digits.zfill(5)
+
+
+def _rgb_triplet_for_json(rgb):
+    """Leaflet / JSON-safe [r,g,b] ints; None if missing."""
+    if rgb is None or not isinstance(rgb, (list, tuple)) or len(rgb) < 3:
+        return None
+    try:
+        out = []
+        for i in range(3):
+            c = rgb[i]
+            if c is None:
+                return None
+            out.append(int(c))
+        return out
+    except (TypeError, ValueError):
+        return None
+
+
+def _hawaii_click_rgb_literal(cc, img_full_rgb):
+    """RGB at (x,y) in full-image pixel coords on the same array used for extraction."""
+    if not isinstance(cc, dict) or img_full_rgb is None or img_full_rgb.ndim != 3:
+        return None
+    try:
+        xf = float(cc.get('x'))
+        yf = float(cc.get('y'))
+    except (TypeError, ValueError):
+        return None
+    h, w = int(img_full_rgb.shape[0]), int(img_full_rgb.shape[1])
+    xi = int(round(xf))
+    yi = int(round(yf))
+    if xi < 0 or yi < 0 or xi >= w or yi >= h:
+        return None
+    pix = img_full_rgb[yi, xi]
+    return [int(pix[0]), int(pix[1]), int(pix[2])]
+
+
+def _hawaii_rgb_from_client(cc):
+    """Fallback: RGB from frontend countyClick.rgb (dict or length-3 sequence)."""
+    if not isinstance(cc, dict):
+        return None
+    rgb_obj = cc.get('rgb')
+    if isinstance(rgb_obj, dict):
+        try:
+            return [int(rgb_obj['r']), int(rgb_obj['g']), int(rgb_obj['b'])]
+        except (KeyError, TypeError, ValueError):
+            return None
+    if isinstance(rgb_obj, (list, tuple)) and len(rgb_obj) >= 3:
+        try:
+            return [int(rgb_obj[0]), int(rgb_obj[1]), int(rgb_obj[2])]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _hawaii_user_rgb_overrides(region_selections, img_full_rgb=None):
+    """Per-county RGB from mark-Hawaii clicks: prefer literal pixels on img_full_rgb, else client rgb."""
     if not region_selections or not isinstance(region_selections, dict):
         return {}
     hi = region_selections.get('hawaii')
     if not hi or not isinstance(hi, dict):
         return {}
-    selections = hi.get('countySelections') or hi.get('county_selections')
+    selections = hi.get('countySelections') or hi.get('county_selections') or hi.get('hawaiiCounties') or hi.get('hawaii_counties')
     if not selections or not isinstance(selections, list):
         return {}
     out = {}
     for item in selections:
         if not isinstance(item, dict):
             continue
-        raw_gid = item.get('geoid')
-        if raw_gid is None:
+        geoid = _normalize_geoid_fips(item.get('geoid') if item.get('geoid') is not None else item.get('GEOID'))
+        if not geoid:
             continue
-        geoid = str(raw_gid).strip().zfill(5)
         cc = item.get('countyClick') or item.get('county_click')
-        if not geoid or not cc or (not isinstance(cc, dict)):
+        if not cc or not isinstance(cc, dict):
             continue
-        rgb_obj = cc.get('rgb')
-        if not rgb_obj or not isinstance(rgb_obj, dict):
+        rgb = _hawaii_click_rgb_literal(cc, img_full_rgb)
+        if rgb is None:
+            rgb = _hawaii_rgb_from_client(cc)
+        if rgb is None:
             continue
-        try:
-            r = int(rgb_obj['r'])
-            g = int(rgb_obj['g'])
-            b = int(rgb_obj['b'])
-        except (KeyError, TypeError, ValueError):
-            continue
-        out[geoid] = [r, g, b]
+        out[geoid] = rgb
     return out
 
 def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', legend_selection=None, n_bins=64, upload_id=None, region_selections=None, projection='4326', legend_type_info=None, csv_basename=None):
@@ -1066,7 +1438,7 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
                                 state_names[geoid] = row['STATE_NAME']
                             elif 'STUSPS' in row:
                                 state_names[geoid] = row['STUSPS']
-    img = Image.open(image_path).convert('RGB')
+    img = ImageOps.exif_transpose(Image.open(image_path)).convert('RGB')
     img_w, img_h = img.size
     img_arr = np.array(img)
     print('\n' + '=' * 70)
@@ -1181,9 +1553,7 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
             else:
                 from backend.utils.homography import rect_bounds_to_corners, homography_from_4pts, apply_homography_to_geometry
         try:
-            img_check = Image.open(image_path)
-            img_w, img_h = img_check.size
-            img_check.close()
+            img_w, img_h = img.size
             print(f"\n  🔍 VERIFYING USER'S MANUAL ALIGNMENT:")
             print(f'  ✓ Image dimensions: {img_w} x {img_h} (natural pixels - SAME image user aligned on)')
             if user_conus_rect4:
@@ -1306,9 +1676,7 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
         except ImportError:
             from backend.utils.homography import rect_bounds_to_corners, homography_from_4pts, apply_homography_to_geometry
         try:
-            img_check = Image.open(image_path)
-            img_w, img_h = img_check.size
-            img_check.close()
+            img_w, img_h = img.size
             print(f"\n  🔍 VERIFYING USER'S MANUAL ALIGNMENT:")
             print(f'  ✓ Image dimensions: {img_w} x {img_h} (natural pixels - SAME image user aligned on)')
             if user_alaska_rect4:
@@ -1327,9 +1695,9 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
                 print(f"  ✓ User's rect4 dimensions: {rect4_width} x {rect4_height} pixels")
                 print(f'  ✓ Image dimensions: {img_w} x {img_h} pixels')
                 print(f'  ✓ Rect4 coverage: {rect4_width / img_w * 100:.1f}% width, {rect4_height / img_h * 100:.1f}% height')
-            xmin, ymin, xmax, ymax = shp_alaska.total_bounds
-            src_bounds = (xmin, ymin, xmax, ymax)
-            src4 = rect_bounds_to_corners(src_bounds, is_geographic=True)
+                xmin, ymin, xmax, ymax = shp_alaska.total_bounds
+                src_bounds = (xmin, ymin, xmax, ymax)
+                src4 = rect_bounds_to_corners(src_bounds, is_geographic=True)
             print(f'  ✓ Shapefile bounds (EPSG:5070): {src_bounds}')
             print(f'  ✓ Source corners (geographic):')
             for i, corner in enumerate(src4):
@@ -1413,7 +1781,7 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
     print(f'Final pixel bounds: ({xmin:.1f}, {ymin:.1f}, {xmax:.1f}, {ymax:.1f})')
     try:
         from PIL import ImageDraw
-        base = Image.open(image_path).convert('RGBA')
+        base = img.convert('RGBA')
         draw = ImageDraw.Draw(base)
         for geom in gdf_px.geometry:
             if geom is None or geom.is_empty:
@@ -1427,7 +1795,7 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
     except Exception as preview_err:
         print(f'Warning: Could not save overlay preview: {preview_err}')
         overlay_path = None
-    img_full = np.array(Image.open(image_path).convert('RGB'))
+    img_full = np.array(img)
     if used_manual_alignment:
         print(f"\n  🔍 Using FULL IMAGE for RGB extraction (user's manual alignment)")
         print(f'    - Shapefile is already in full image pixel coordinates')
@@ -1481,7 +1849,7 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
     elif aligned_regions:
         gdf_combined = gpd.GeoDataFrame(pd.concat(aligned_regions, ignore_index=True))
         transform = _raster_transform_for_image_and_shp(gdf_combined, img_w, img_h)
-        for idx, row in gdf_combined.iterrows():
+        for _, row in gdf_combined.iterrows():
             geom = row.geometry
             gid = row['GEOID']
             if geom is None or geom.is_empty:
@@ -1489,7 +1857,13 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
                 avg_rgbs.append([0, 0, 0])
                 continue
             try:
-                mask = rasterize([(geom, 1)], out_shape=(img_h, img_w), transform=transform, fill=0, dtype='uint8')
+                mask = rasterize(
+                    [(geom, 1)],
+                    out_shape=(img_h, img_w),
+                    transform=transform,
+                    fill=0,
+                    dtype='uint8',
+                )
             except Exception:
                 results.append({'GEOID': gid, 'rgb': [None, None, None]})
                 avg_rgbs.append([0, 0, 0])
@@ -1512,8 +1886,9 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
             results.append({'GEOID': gid, 'rgb': rgb_list})
             avg_rgbs.append(rgb_list)
     for r in results:
-        r['GEOID'] = str(r['GEOID']).strip().zfill(5)
-    hi_pick = _hawaii_user_rgb_overrides(region_selections)
+        ng = _normalize_geoid_fips(r.get('GEOID'))
+        r['GEOID'] = ng if ng else str(r.get('GEOID', '')).strip().zfill(5)
+    hi_pick = _hawaii_user_rgb_overrides(region_selections, img_full_rgb=img_full)
     if hi_pick:
         print(f'\n  🌺 Hawaii: applying user-picked RGB for {len(hi_pick)} counties (mark-Hawaii clicks): {list(hi_pick.keys())}')
         for i, r in enumerate(results):
@@ -1526,7 +1901,7 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
                 avg_rgbs[i] = list(rgb)
     elif region_selections and isinstance(region_selections.get('hawaii'), dict):
         hi = region_selections['hawaii']
-        has_sel = hi.get('countySelections') or hi.get('county_selections')
+        has_sel = hi.get('countySelections') or hi.get('county_selections') or hi.get('hawaiiCounties') or hi.get('hawaii_counties')
         if has_sel:
             print(f'\n  ⚠️  Hawaii countySelections present ({len(has_sel)} items) but no RGB parsed — check countyClick.rgb / geoid shape')
     all_rgb_values = [r['rgb'] for r in results]
@@ -1545,14 +1920,13 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
             legend_colors = np.array([rgb for rgb, _, _ in user_legend])
             legend_labels = [label for _, label, _ in user_legend]
             legend_values = [value for _, _, value in user_legend]
-            print(f'  ✓ Binned legend: CSV uses midpoint (or hint) per bin; GeoJSON keeps range text on bin_range: {legend_labels}')
-        else:
-            legend_colors = np.array([rgb for rgb, _, _ in user_legend])
-            legend_labels = [label for _, label, _ in user_legend]
-            legend_values = [value for _, _, value in user_legend]
-            print(f'  ✓ Using bin labels from legend: {legend_labels}')
-            print(f'  ✓ Using bin values from legend: {legend_values}')
-            if not legend_values and legend_type_info and (legend_type_info.get('minValue') is not None) and (legend_type_info.get('maxValue') is not None):
+            print(f'  ✓ Binned legend: CSV uses full legend text per county (value column). Labels: {legend_labels}')
+            if (
+                not legend_values
+                and legend_type_info
+                and (legend_type_info.get('minValue') is not None)
+                and (legend_type_info.get('maxValue') is not None)
+            ):
                 min_val = legend_type_info.get('minValue')
                 max_val = legend_type_info.get('maxValue')
                 num_bins = len(legend_colors)
@@ -1564,8 +1938,8 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
                         value = min_val
                     legend_values.append(value)
                 print(f'  ✓ Interpolated values from min/max: {legend_values}')
-            if not legend_values:
-                legend_values = list(range(len(legend_colors)))
+                if not legend_values:
+                    legend_values = list(range(len(legend_colors)))
                 print(f'  ⚠️  No bin values extracted, using bin indices as values: {legend_values}')
     else:
         legend_colors = rgb_leg(all_rgb_values, n_bins)
@@ -1584,9 +1958,9 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
                     else:
                         r['value'] = None
                 elif export_bin_range_column and legend_labels is not None and len(legend_labels) > 0 and (bin_idx < len(legend_labels)):
-                    lbl = legend_labels[bin_idx]
-                    hint = legend_values[bin_idx] if legend_values is not None and bin_idx < len(legend_values) else None
-                    r['value'] = _representative_numeric_from_bin_label(lbl, hint)
+                    # Binned legend: store the full legend text in the CSV value column.
+                    lbl = str(legend_labels[bin_idx])
+                    r['value'] = lbl
                     r['bin_range_label'] = lbl
                 elif legend_labels is not None and len(legend_labels) > 0 and (bin_idx < len(legend_labels)):
                     r['value'] = legend_labels[bin_idx]
@@ -1650,16 +2024,28 @@ def process_uploaded_image(image_path, layer_name='uploaded', out_dir='data', le
     else:
         shp4326 = gpd.GeoDataFrame(pd.concat(shp_for_geojson_list, ignore_index=True), crs=4326)
     print(f'  Total counties in GeoJSON: {len(shp4326)}')
-    rgb_map = {r['GEOID']: list(r['rgb']) if r.get('rgb') is not None else [None, None, None] for r in results}
-    value_map = {r['GEOID']: r.get('value') for r in results}
-    bin_label_map = {r['GEOID']: r.get('bin_range_label') for r in results}
-    hi_pick_final = _hawaii_user_rgb_overrides(region_selections)
+    rgb_map = {}
+    value_map = {}
+    bin_label_map = {}
+    for r in results:
+        gk = _normalize_geoid_fips(r.get('GEOID'))
+        if not gk:
+            gk = str(r.get('GEOID', '')).strip()
+        rr = r.get('rgb')
+        rgb_map[gk] = list(rr) if rr is not None else [None, None, None]
+        value_map[gk] = r.get('value')
+        bin_label_map[gk] = r.get('bin_range_label')
+    hi_pick_final = _hawaii_user_rgb_overrides(region_selections, img_full_rgb=img_full)
     for gid, rgb in hi_pick_final.items():
-        rgb_map[str(gid).strip().zfill(5)] = list(rgb)
+        gk = _normalize_geoid_fips(gid) or str(gid).strip().zfill(5)
+        rgb_map[gk] = list(rgb)
     features = []
     for _, row in shp4326.iterrows():
-        row_gid = str(row['GEOID']).strip().zfill(5)
-        rgb = rgb_map.get(row_gid, [None, None, None])
+        row_gid = _normalize_geoid_fips(row.get('GEOID'))
+        if not row_gid:
+            row_gid = str(row['GEOID']).strip().zfill(5)
+        rgb_raw = rgb_map.get(row_gid)
+        rgb = _rgb_triplet_for_json(rgb_raw)
         county_name = county_names.get(row_gid, row_gid)
         state_name = state_names.get(row_gid, '')
         state_abbr = row.get('STUSPS', '') if 'STUSPS' in row else ''

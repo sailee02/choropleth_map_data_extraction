@@ -31,6 +31,17 @@ export default function Upload({ onNavigateToHome }) {
   const [manualBoundsJson, setManualBoundsJson] = useState("");
   const imageDisplayRef = useRef(null);
 
+  const canSelectLegend = !!uploadedFile && !isDetecting && !!uploadId;
+  const canProcess =
+    !!uploadedFile &&
+    !!legendSelection &&
+    !!legendTypeInfo &&
+    !!uploadId &&
+    !isDetecting &&
+    !isLoading &&
+    !!regionSelections &&
+    !!regionSelections.conus;
+
   useEffect(() => {
     return () => {
       if (uploadedImageUrl) {
@@ -133,7 +144,7 @@ export default function Upload({ onNavigateToHome }) {
   };
 
   const handleSkipRegions = () => {
-    setRegionSelections({ alaska: null, hawaii: null });
+    setRegionSelections({ conus: null, alaska: null, hawaii: null });
     setShowRegionSelector(false);
     setMessage("Legend area selected. Click 'Process Image' to continue.");
   };
@@ -407,61 +418,6 @@ export default function Upload({ onNavigateToHome }) {
               Select File
             </button>
             
-            {uploadedFile && (
-              <button
-                onClick={() => {
-                  if (isDetecting || !uploadId) {
-                    setMessage("Wait for bounds detection before selecting the legend area.");
-                    return;
-                  }
-                  setShowLegendTypeSelector(true);
-                }}
-                disabled={isDetecting || !uploadId}
-                style={{
-                  backgroundColor:
-                    isDetecting || !uploadId ? "#94a3b8" : "#007bff",
-                  color: "white",
-                  border: "none",
-                  padding: "12px 24px",
-                  borderRadius: "6px",
-                  fontSize: "16px",
-                  fontWeight: "500",
-                  cursor: isDetecting || !uploadId ? "not-allowed" : "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                Select Legend Area
-              </button>
-            )}
-            
-            {uploadedFile && legendSelection && (
-              <button
-                onClick={handleProcessImage}
-                disabled={isLoading || isDetecting || !uploadId}
-                style={{
-                  backgroundColor:
-                    isLoading || isDetecting || !uploadId ? "#ccc" : "#28a745",
-                  color: "white",
-                  border: "none",
-                  padding: "12px 24px",
-                  borderRadius: "6px",
-                  fontSize: "16px",
-                  fontWeight: "500",
-                  cursor:
-                    isLoading || isDetecting || !uploadId ? "not-allowed" : "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                {isLoading
-                  ? "Processing..."
-                  : isDetecting
-                  ? "Detecting Bounds..."
-                  : !uploadId
-                  ? "Awaiting Bounds"
-                  : "Process Image"}
-              </button>
-            )}
-            
             <button
               onClick={handleCancel}
               style={{
@@ -479,90 +435,6 @@ export default function Upload({ onNavigateToHome }) {
               Cancel
             </button>
           </div>
-
-          
-          {message && (
-            <div
-              style={{
-                marginTop: "24px",
-                padding: "16px",
-                backgroundColor:
-                  message.includes("error") || message.includes("failed")
-                    ? "#fef2f2"
-                    : "#f0f9ff",
-                color:
-                  message.includes("error") || message.includes("failed")
-                    ? "#dc2626"
-                    : "#0369a1",
-                borderRadius: "6px",
-                fontSize: "14px",
-                textAlign: "left",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  marginBottom: "8px",
-                }}
-              >
-                <span style={{ fontSize: "16px" }}>
-                  {isLoading
-                    ? "⏳"
-                    : message.includes("error") || message.includes("failed")
-                    ? "❌"
-                    : "ℹ️"}
-                </span>
-                <strong>Status</strong>
-              </div>
-              <div>{message}</div>
-            </div>
-          )}
-
-
-          
-          {geojson && (
-            <div style={{ marginTop: "24px" }}>
-              <button
-                type="button"
-                onClick={handleCsvDownload}
-                disabled={csvDownloading}
-                style={{
-                  display: "inline-block",
-                  backgroundColor: csvDownloading ? "#94a3b8" : "#10b981",
-                  color: "white",
-                  border: "none",
-                  cursor: csvDownloading ? "not-allowed" : "pointer",
-                  padding: "12px 24px",
-                  borderRadius: "6px",
-                  fontSize: "16px",
-                  fontWeight: "500",
-                  transition: "all 0.2s ease",
-                }}
-                onMouseEnter={(e) => {
-                  if (!csvDownloading) e.target.style.backgroundColor = "#059669";
-                }}
-                onMouseLeave={(e) => {
-                  if (!csvDownloading) e.target.style.backgroundColor = "#10b981";
-                }}
-              >
-                {csvDownloading ? "Preparing download…" : "📥 Download CSV Data"}
-              </button>
-              {csvDownloadError ? (
-                <p
-                  style={{
-                    marginTop: "10px",
-                    color: "#b91c1c",
-                    fontSize: "14px",
-                    maxWidth: "480px",
-                  }}
-                >
-                  {csvDownloadError}
-                </p>
-              ) : null}
-            </div>
-          )}
         </div>
       </section>
 
@@ -717,6 +589,98 @@ export default function Upload({ onNavigateToHome }) {
               </div>
             )}
           </div>
+
+          {uploadedImageUrl && !geojson && (
+            <div
+              style={{
+                marginTop: "16px",
+                display: "flex",
+                gap: "12px",
+                justifyContent: "center",
+                flexWrap: "wrap",
+              }}
+            >
+              <button
+                onClick={() => setShowLegendTypeSelector(true)}
+                disabled={!canSelectLegend}
+                style={{
+                  backgroundColor: !canSelectLegend ? "#94a3b8" : "#007bff",
+                  color: "white",
+                  border: "none",
+                  padding: "12px 24px",
+                  borderRadius: "6px",
+                  fontSize: "16px",
+                  fontWeight: "500",
+                  cursor: !canSelectLegend ? "not-allowed" : "pointer",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                Select Legend Area
+              </button>
+
+              <button
+                onClick={handleProcessImage}
+                disabled={!canProcess}
+                style={{
+                  backgroundColor: !canProcess ? "#94a3b8" : "#007bff",
+                  color: "white",
+                  border: "none",
+                  padding: "12px 24px",
+                  borderRadius: "6px",
+                  fontSize: "16px",
+                  fontWeight: "500",
+                  cursor: !canProcess ? "not-allowed" : "pointer",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {isLoading ? "Processing..." : "Process Image"}
+              </button>
+            </div>
+          )}
+
+          {geojson && (
+            <div style={{ marginTop: "16px", textAlign: "center" }}>
+              <button
+                type="button"
+                onClick={handleCsvDownload}
+                disabled={csvDownloading}
+                style={{
+                  display: "inline-block",
+                  backgroundColor: csvDownloading ? "#94a3b8" : "#10b981",
+                  color: "white",
+                  border: "none",
+                  cursor: csvDownloading ? "not-allowed" : "pointer",
+                  padding: "12px 24px",
+                  borderRadius: "6px",
+                  fontSize: "16px",
+                  fontWeight: "500",
+                  transition: "all 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  if (!csvDownloading) e.target.style.backgroundColor = "#059669";
+                }}
+                onMouseLeave={(e) => {
+                  if (!csvDownloading) e.target.style.backgroundColor = "#10b981";
+                }}
+              >
+                {csvDownloading ? "Preparing download…" : "Download CSV"}
+              </button>
+              {csvDownloadError ? (
+                <p
+                  style={{
+                    marginTop: "10px",
+                    color: "#b91c1c",
+                    fontSize: "14px",
+                    maxWidth: "480px",
+                    marginLeft: "auto",
+                    marginRight: "auto",
+                  }}
+                >
+                  {csvDownloadError}
+                </p>
+              ) : null}
+            </div>
+          )}
         </section>
       )}
       

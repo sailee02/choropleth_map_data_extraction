@@ -42,10 +42,10 @@ export default function HawaiiCountySelector({
     
     
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     canvas.width = naturalWidth;
     canvas.height = naturalHeight;
-    
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(img, 0, 0);
     const imageData = ctx.getImageData(x, y, 1, 1);
     const [r, g, b] = imageData.data;

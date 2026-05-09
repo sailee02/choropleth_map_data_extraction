@@ -247,7 +247,7 @@ export default function Home({ onNavigateToUpload }) {
               margin: "0",
               lineHeight: "1.4"
             }}>
-              Binned legends are supported.
+              Binned and continuous legends are supported.
             </p>
           </div>
         </div>

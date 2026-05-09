@@ -1,2 +1,14 @@
 backend/__pycache__/
 backend/data/*.jpg
+**/__pycache__/
+*.pyc
+
+# Generated outputs / artifacts
+backend/data/*.png
+backend/data/*.csv
+backend/data/*.geojson
+backend/data/*_legend.json
+
+# Frontend build + deps
+frontend/dist/
+frontend/node_modules/
