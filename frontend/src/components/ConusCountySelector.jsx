@@ -612,7 +612,7 @@ export default function ConusCountySelector({
               minHeight: '300px'
             }}>
               <img
-                src="/conus_borders.png"
+                src={`${import.meta.env.BASE_URL}conus_borders.png`}
                 alt="CONUS Counties Reference"
                 style={{
                   maxWidth: '100%',

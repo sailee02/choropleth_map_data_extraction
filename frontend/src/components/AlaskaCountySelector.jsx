@@ -606,7 +606,7 @@ export default function AlaskaCountySelector({
               minHeight: '300px'
             }}>
               <img
-                src="/alaska_borders.png"
+                src={`${import.meta.env.BASE_URL}alaska_borders.png`}
                 alt="Alaska Counties Reference"
                 style={{
                   maxWidth: '100%',

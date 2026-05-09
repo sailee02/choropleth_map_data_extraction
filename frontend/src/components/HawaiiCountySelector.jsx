@@ -209,7 +209,7 @@ export default function HawaiiCountySelector({
               minHeight: '300px'
             }}>
               <img
-                src="/hawaii_colored_counties.png"
+                src={`${import.meta.env.BASE_URL}hawaii_colored_counties.png`}
                 alt="Hawaii Counties Reference"
                 style={{
                   maxWidth: '100%',
