@@ -57,7 +57,7 @@ def generate_region_overlay_preview(image_path: str, upload_id: str, bounds_bbox
             shapefile_path = _get_region_shapefile_path(region=region, projection=projection)
         if not os.path.exists(shapefile_path):
             if region == 'conus':
-                fallback_conus_path = os.path.join(BASE_DIR, 'cb_2024_us_county_500k_conus', 'cb_2024_us_county_500k_conus.shp')
+                fallback_conus_path = os.path.join(BASE_DIR, 'data', 'shapefiles', 'cb_2024_us_county_500k_conus', 'cb_2024_us_county_500k_conus.shp')
                 if os.path.exists(fallback_conus_path):
                     shapefile_path = fallback_conus_path
                     print(f'    Using CONUS-only fallback shapefile (no Alaska/Hawaii)')

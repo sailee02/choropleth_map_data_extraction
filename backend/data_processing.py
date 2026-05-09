@@ -23,23 +23,24 @@ try:
 except Exception:
     from backend.utils.geo_align import fit_gdf_to_bbox_pixels, refine_alignment_with_edge_matching, fit_with_autoinset
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHAPEFILES_DIR = os.environ.get('SHAPEFILES_DIR', os.path.join(BASE_DIR, 'data', 'shapefiles'))
 
 def _get_region_shapefile_path(region='conus', projection='4326'):
     shapefile_name = f'cb_2024_us_county_500k_{region}_epsg{projection}'
-    return os.path.join(BASE_DIR, shapefile_name, f'{shapefile_name}.shp')
+    return os.path.join(SHAPEFILES_DIR, shapefile_name, f'{shapefile_name}.shp')
 
 def _get_region_outline_path(region='conus', projection='4326'):
     base_name = f'cb_2024_us_county_500k_{region}_epsg{projection}'
     outline_folder = f'{base_name}_OUTLINE'
-    return os.path.join(BASE_DIR, outline_folder, f'{region}_outline.shp')
+    return os.path.join(SHAPEFILES_DIR, outline_folder, f'{region}_outline.shp')
 
 def _get_shapefile_path(projection='4326', use_full=False):
     if projection == '4326':
-        return os.path.join(BASE_DIR, 'cb_2024_us_county_500k_conus_epsg4326', 'cb_2024_us_county_500k_conus_epsg4326.shp')
+        return os.path.join(SHAPEFILES_DIR, 'cb_2024_us_county_500k_conus_epsg4326', 'cb_2024_us_county_500k_conus_epsg4326.shp')
     else:
-        return os.path.join(BASE_DIR, 'cb_2024_us_county_500k_conus_epsg5070', 'cb_2024_us_county_500k_conus_epsg5070.shp')
-SHAPEFILE_PATH = os.environ.get('SHAPEFILE_PATH', os.path.join(BASE_DIR, 'cb_2024_us_county_500k_conus', 'cb_2024_us_county_500k_conus.shp'))
-FULL_SHAPEFILE_PATH = os.environ.get('FULL_SHAPEFILE_PATH', os.path.join(BASE_DIR, 'cb_2024_us_county_500k', 'cb_2024_us_county_500k.shp'))
+        return os.path.join(SHAPEFILES_DIR, 'cb_2024_us_county_500k_conus_epsg5070', 'cb_2024_us_county_500k_conus_epsg5070.shp')
+SHAPEFILE_PATH = os.environ.get('SHAPEFILE_PATH', os.path.join(SHAPEFILES_DIR, 'cb_2024_us_county_500k_conus', 'cb_2024_us_county_500k_conus.shp'))
+FULL_SHAPEFILE_PATH = os.environ.get('FULL_SHAPEFILE_PATH', os.path.join(SHAPEFILES_DIR, 'cb_2024_us_county_500k', 'cb_2024_us_county_500k.shp'))
 DATA_DIR = os.environ.get('DATA_DIR', 'data')
 
 _tesseract_missing_logged = False

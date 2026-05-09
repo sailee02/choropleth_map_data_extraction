@@ -56,30 +56,23 @@ export default function HawaiiCountySelector({
   
   const handleHawaiiClick = (e) => {
     if (!imageRef.current || !hawaiiSelection || !containerRef.current) return;
+    if (!imageLoaded) return;
     
     
     if (selectedCounties.length >= 5) return;
     
-    const containerRect = containerRef.current.getBoundingClientRect();
-    const clickX = e.clientX - containerRect.left;
-    const clickY = e.clientY - containerRect.top;
-    
-    
+    // Use the actual rendered <img> box to avoid container border/padding offsets.
+    const imgRect = imageRef.current.getBoundingClientRect();
+    if (!imgRect || imgRect.width <= 1 || imgRect.height <= 1) return;
+    const clickX = e.clientX - imgRect.left;
+    const clickY = e.clientY - imgRect.top;
+    if (clickX < 0 || clickY < 0 || clickX > imgRect.width || clickY > imgRect.height) return;
+
     const natWidth = imageRef.current.naturalWidth;
     const natHeight = imageRef.current.naturalHeight;
-    const padding = 10;
-    const availableWidth = containerRect.width - (padding * 2);
-    const availableHeight = containerRect.height - (padding * 2);
-    
-    const scale = Math.min(
-      availableWidth / hawaiiSelection.width,
-      availableHeight / hawaiiSelection.height
-    );
-    
-    
-    
-    const natX = hawaiiSelection.x + ((clickX - padding) / scale);
-    const natY = hawaiiSelection.y + ((clickY - padding) / scale);
+    if (!natWidth || !natHeight) return;
+    const natX = (clickX / imgRect.width) * natWidth;
+    const natY = (clickY / imgRect.height) * natHeight;
     
     
     const hiX = hawaiiSelection.x;
@@ -120,22 +113,26 @@ export default function HawaiiCountySelector({
 
   
   const getHawaiiRectStyle = () => {
-    if (!hawaiiSelection || !imageRef.current) return null;
-    
-    const rect = imageRef.current.getBoundingClientRect();
+    if (!hawaiiSelection || !imageRef.current || !containerRef.current) return null;
+    const imgRect = imageRef.current.getBoundingClientRect();
+    const containerRect = containerRef.current.getBoundingClientRect();
     const natWidth = imageRef.current.naturalWidth;
     const natHeight = imageRef.current.naturalHeight;
-    
+    if (!natWidth || !natHeight || imgRect.width <= 1 || imgRect.height <= 1) return null;
+
+    const offsetX = imgRect.left - containerRect.left;
+    const offsetY = imgRect.top - containerRect.top;
+
     return {
       position: 'absolute',
-      left: (hawaiiSelection.x / natWidth) * rect.width,
-      top: (hawaiiSelection.y / natHeight) * rect.height,
-      width: (hawaiiSelection.width / natWidth) * rect.width,
-      height: (hawaiiSelection.height / natHeight) * rect.height,
+      left: offsetX + (hawaiiSelection.x / natWidth) * imgRect.width,
+      top: offsetY + (hawaiiSelection.y / natHeight) * imgRect.height,
+      width: (hawaiiSelection.width / natWidth) * imgRect.width,
+      height: (hawaiiSelection.height / natHeight) * imgRect.height,
       border: '3px solid #10b981',
       backgroundColor: 'rgba(16, 185, 129, 0.1)',
       pointerEvents: 'none',
-      zIndex: 5
+      zIndex: 5,
     };
   };
 
@@ -348,22 +345,18 @@ export default function HawaiiCountySelector({
                     
                     const natWidth = imageRef.current.naturalWidth;
                     const natHeight = imageRef.current.naturalHeight;
-                    const containerWidth = containerRef.current.clientWidth || 800;
-                    const containerHeight = containerRef.current.clientHeight || 600;
-                    
-                    
-                    const padding = 10;
-                    const availableWidth = containerWidth - (padding * 2);
-                    const availableHeight = containerHeight - (padding * 2);
-                    
-                    const scale = Math.min(
-                      availableWidth / hawaiiSelection.width,
-                      availableHeight / hawaiiSelection.height
-                    );
-                    
-                    
-                    const displayX = padding + (county.countyClick.x - hawaiiSelection.x) * scale;
-                    const displayY = padding + (county.countyClick.y - hawaiiSelection.y) * scale;
+                    if (!natWidth || !natHeight) return null;
+
+                    const imgRect = imageRef.current.getBoundingClientRect();
+                    const containerRect = containerRef.current.getBoundingClientRect();
+                    if (!imgRect || imgRect.width <= 1 || imgRect.height <= 1) return null;
+
+                    const offsetX = imgRect.left - containerRect.left;
+                    const offsetY = imgRect.top - containerRect.top;
+
+                    // Convert natural image coords -> displayed pixel coords (relative to container)
+                    const displayX = offsetX + (county.countyClick.x / natWidth) * imgRect.width;
+                    const displayY = offsetY + (county.countyClick.y / natHeight) * imgRect.height;
                     
                     return (
                       <div
